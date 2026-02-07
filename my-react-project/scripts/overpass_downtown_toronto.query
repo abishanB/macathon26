@@ -1,0 +1,5 @@
+[out:json][timeout:25];
+(
+  way["highway"](43.62,-79.44,43.69,-79.35);
+);
+out geom;
