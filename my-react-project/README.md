@@ -1,73 +1,41 @@
-# React + TypeScript + Vite
+# Downtown Toronto Reactive Traffic Heatmap MVP
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Fast planning-grade traffic proxy built with React + TypeScript + Vite + Mapbox GL JS.
 
-Currently, two official plugins are available:
+## What it does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- Loads road lines from `public/data/roads_downtown.geojson`
+- Builds a directed graph with snapped endpoints
+- Generates synthetic OD demand weighted toward downtown core
+- Runs a 2-iteration assignment with a BPR-style congestion function
+- Colors roads by delay factor (`t / t0`)
+- Toggles road closures by clicking road segments and recomputes in near real time
 
-## React Compiler
+## Setup
 
-The React Compiler is currently not compatible with SWC. See [this issue](https://github.com/vitejs/vite-plugin-react/issues/428) for tracking the progress.
+1. Install dependencies:
+   - `npm install`
+2. Create env file:
+   - copy `.env.example` to `.env`
+   - set `VITE_MAPBOX_TOKEN=...`
+3. Run:
+   - `npm run dev`
 
-## Expanding the ESLint configuration
+## Scripts
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- `npm run dev` starts the Vite app
+- `npm run build` runs strict TypeScript build and production bundle
+- `npm run lint` runs ESLint
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Data notes
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+- The app does not fetch roads at runtime.
+- It reads local static data from `public/data/roads_downtown.geojson`.
+- A synthetic grid seed file is included so the app works out of the box.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Optional Overpass refresh workflow
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+1. Use query file: `scripts/overpass_downtown_toronto.query`
+2. Optional helper: `scripts/fetch-overpass-roads.ps1`
+3. In Overpass Turbo, run the query and export as GeoJSON.
+4. Save export to `public/data/roads_downtown.geojson`.
