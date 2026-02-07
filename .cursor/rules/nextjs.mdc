@@ -1,0 +1,17 @@
+# Next.js 15 + React Hackathon Rules
+# From cursor.directory/nextjs-react-typescript [web:52]
+
+## APP ROUTER
+- Dynamic: [bbox]/page.tsx → generateStaticParams if needed
+- Actions: server actions for sim runs
+- Suspense + loading.tsx everywhere
+
+## HOOKS/STYLE
+- useSWR or TanStack Query for sim data
+- Tailwind: sm/md/lg responsive maps
+- shadcn/ui components (npm i class-variance-authority)
+
+## HACKATHON SPEED
+- Copy‑paste from examples first
+- Hardcode demo data (Waterloo bbox)
+- Vercel preview links in README
