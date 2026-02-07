@@ -3,6 +3,8 @@ import { useRef, useEffect, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./App.css";
+import MapboxDraw from '@mapbox/mapbox-gl-draw';
+import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 
 const INITIAL_CENTER: [number, number] = [-79.3662, 43.715];//long, lat - Toronto, Canada
 const INITIAL_ZOOM: number = 10.35;
@@ -35,46 +37,59 @@ export default function App() {
 
     mapRef.current = map; // assign to ref once created
 
-    // Once style is loaded, add a small extruded cube in Toronto
-    map.on('style.load', () => {
-      // GeoJSON square around downtown Toronto (~-79.3832, 43.6532)
-      const cubeGeoJSON = {
-        type: 'FeatureCollection',
-        features: [
-          {
-            type: 'Feature',
-            properties: { height: 80 },
-            geometry: {
-              type: 'Polygon',
-              coordinates: [[
-                [-79.3852, 43.6522],
-                [-79.3812, 43.6522],
-                [-79.3812, 43.6542],
-                [-79.3852, 43.6542],
-                [-79.3852, 43.6522]
-              ]]
-            }
-          }
-        ]
-      } as GeoJSON.FeatureCollection;
+    const draw = new MapboxDraw({
+      displayControlsDefault: false,
+      controls: { polygon: true, trash: true }
+    });
+    map.addControl(draw, 'top-left');
 
-      if (!map.getSource('toronto-cube')) {
-        map.addSource('toronto-cube', { type: 'geojson', data: cubeGeoJSON });
+    // ensure a source/layer to render extrusions from Draw features
+    const ensureUserSourceAndLayer = () => {
+      if (!map.getSource('user-shape')) {
+        map.addSource('user-shape', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      }
+      if (!map.getLayer('user-shape-extrude')) {
         map.addLayer({
-          id: 'toronto-cube-layer',
+          id: 'user-shape-extrude',
           type: 'fill-extrusion',
-          source: 'toronto-cube',
+          source: 'user-shape',
           paint: {
-            'fill-extrusion-color': '#00db84',
-            'fill-extrusion-height': ['get', 'height'],
+            'fill-extrusion-color': '#ff7e5f',
+            'fill-extrusion-height': ['coalesce', ['get', 'height'], 40],
             'fill-extrusion-base': 0,
-            'fill-extrusion-opacity': 0.9
+            'fill-extrusion-opacity': 0.8
           }
         });
       }
+    };
+
+    map.on('style.load', () => {
+      ensureUserSourceAndLayer();
     });
 
+    // when user creates/updates/deletes shapes, copy Draw features to the geojson source
+    const updateFromDraw = () => {
+      const data = draw.getAll();
+      // set a default height property for each polygon feature if missing
+      data.features.forEach((f: any) => {
+        if (!f.properties) f.properties = {};
+        if (f.geometry?.type === 'Polygon' && f.properties.height == null) f.properties.height = 40;
+      });
+      if (map.getSource('user-shape')) {
+        (map.getSource('user-shape') as mapboxgl.GeoJSONSource).setData(data);
+      }
+    };
+
+    map.on('draw.create', updateFromDraw);
+    map.on('draw.update', updateFromDraw);
+    map.on('draw.delete', updateFromDraw);
+
+    // cleanup
     return () => {
+      map.off('draw.create', updateFromDraw);
+      map.off('draw.update', updateFromDraw);
+      map.off('draw.delete', updateFromDraw);
+      map.removeControl(draw);
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
