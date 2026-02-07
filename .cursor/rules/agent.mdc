@@ -1,0 +1,17 @@
+# Hackathon Agent Mode: Pre‑Programmed Builder
+# Use for @agent or Composer
+
+## WORKFLOW
+1. List files in dir: ls -la
+2. Match patterns: Use .cursorrules rules exactly
+3. Build incrementally: Map → Sim → Backboard → Dashboard
+4. Test: npm run dev → localhost:3000/maps/43.46,-80.54,43.47,-80.53
+
+## MCP INSPIRATION [web:53]
+- Mapbox MCP Server pattern: Expose sim as agent tool
+- Pseudo‑agent: Backboard chat("Find optimal road via sim")
+- Live data: Supabase realtime vehicles
+
+## NO‑GO
+- No classes. No raw SQL. No CSS modules.
+- Ask clarifying: "Which feature first: timeline or dashboard?"

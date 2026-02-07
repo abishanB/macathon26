@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Map, MapboxGeoJSONFeature, MapMouseEvent } from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import MapboxGeocoder from "@mapbox/mapbox-gl-geocoder";
+import "@mapbox/mapbox-gl-geocoder/dist/mapbox-gl-geocoder.css";
 import "./App.css";
 import { initMap } from "./map/initMap";
 import { addRoadLayers, ROAD_LAYER_IDS, updateRoadSourceData } from "./map/layers";

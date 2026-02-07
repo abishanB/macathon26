@@ -1,0 +1,25 @@
+# Backboard.io RAG/Memory Rules
+# Globs: **/backboard*, **/api/sim*
+
+## SDK USAGE
+import { BackboardClient } from 'backboard-sdk';
+const client = new BackboardClient({ apiKey: process.env.BACKBOARD_API_KEY });
+
+## THREADS (Location‑Agnostic)
+- ID: `project_${hash(bbox + userId)}`
+- Always: client.add(threadId, `Area: ${address} bbox:${bbox} density:${density}`)
+
+## RAG VECTOR SEARCH
+- Upload: client.uploadDocumentToThread(threadId, {content: bylawsText, metadata:{location}})
+- Chat auto‑retrieves: semantic + keyword on regs/sims
+- Prompt: "Analyze ${simResults} vs priors/regs. JSON output."
+
+## BEST PROMPTS FOR URBAN SIM
+Location: ${address} (${bbox})
+Sim: ${JSON.stringify(simResults)}
+Retrieve: zoning, priors, census
+Output: {severity:1-10, affected:X, summary:Y, fixes:Z}
+
+## ERRORS
+- Rate limits: Retry with exponential backoff
+- Empty retrieval: Fallback generic rules

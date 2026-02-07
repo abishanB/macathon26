@@ -1,0 +1,45 @@
+# UrbanSim Hackathon: Next.js Mapbox Roadrunner Backboard Stack
+# Hackathon MVP: Editable maps + traffic sim + AI impact analysis. Global/any area.
+
+## PROJECT OVERVIEW
+- Next.js 15 App Router + TypeScript + Tailwind + Supabase auth/DB/realtime.
+- Mapbox GL JS v3 + Turf.js for editable geo (draw buildings/roads on any bbox/address).
+- Roadrunner Docker API for traffic sim (integrate via HTTP/Redis).
+- Backboard.io SDK for persistent memory/RAG (threads per project, upload zoning PDFs).
+- Vercel deploy. Hackathon focus: demo‑ready, Backboard prize.
+
+## ARCHITECTURE PATTERNS
+- Server Components default. 'use client' only for map interactivity.
+- API routes: /api/sim → Roadrunner call → Backboard analysis → JSON.
+- Folder structure:
+  app/
+  ├── (maps)/[bbox]/page.tsx      # Dynamic map pages
+  ├── api/sim/route.ts            # Backboard + Roadrunner
+  ├── lib/backboard.ts            # Client singleton
+  ├── lib/roadrunner.ts           # Docker API wrapper
+  └── components/MapEditor.tsx    # Mapbox + draw tools
+- State: URL params (bbox/address) + Supabase realtime + Backboard threads.
+
+## CODING RULES
+- TypeScript strict. Inferact types. Zod for API schemas.
+- Components: PascalCase arrow functions. Extract hooks (useMap, useSim).
+- Error handling: try/catch + Sentry. Loading skeletons everywhere.
+- Geo: Always validate bbox/latlng with Turf. Use Mapbox tokens securely.
+- Backboard: One client singleton. Threads: `project_${bboxHash}_${userId}`.
+- Performance: React.memo maps. Lazy load Roadrunner viewer.
+
+## BEST PRACTICES
+- Match existing: Scan imports first, copy patterns.
+- Geo patterns: bbox strings, GeoJSON FeatureCollections.
+- Backboard calls: Always add location context before chat.
+- No fluff comments. JSDoc for components/hooks.
+- Hackathon: Console.log for demo debugging. Remove before submit.
+
+## DEPENDENCIES (npm i these)
+@mapbox/mapbox-gl-geocoder mapbox-gl @turf/turf @supabase/supabase-js backboard-sdk recharts jsPDF
+Docker: stevetarter/roadrunner
+
+## FILES TO REFERENCE
+@file tsconfig.json
+@file tailwind.config.ts
+@file .env.example (Mapbox/BACKBOARD_KEY/SUPABASE_URL)

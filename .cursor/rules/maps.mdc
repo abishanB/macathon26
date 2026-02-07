@@ -1,0 +1,25 @@
+# Mapbox GL JS Urban Editor Rules
+# Globs: **/map*.tsx, **/editor*.tsx
+
+## MAPBOX PATTERNS
+- mapboxgl.Map({ container, style: 'mapbox://styles/mapbox/streets-v12', center, zoom:14 })
+- Access token: process.env.NEXT_PUBLIC_MAPBOX_TOKEN
+- Draw mode: map.addControl(new MapboxDraw())
+- Edit GeoJSON: map.on('draw.create', handleEdit)
+- Turf ops: turf.bbox(map.getBounds()), turf.buffer(building, 50, {units:'meters'})
+- Custom cursor: map.getCanvas().style.cursor = 'crosshair' on draw mode [web:49]
+
+## SIM INTEGRATION
+- POST edited GeoJSON to /api/sim
+- Overlay sim vehicles: source 'vehicles', data from realtime/Redis
+- Heatmap layers for congestion: 'heatmap', paint: ['heatmap-density']
+
+## MCP HELPERS (Mapbox‑compatible)
+- Use Mapbox Directions/Geocoding APIs for POIs/origins.
+- Pseudo‑MCP: Backboard chat simulates agent ("Suggest compliant edits").
+- Examples: cursor.directory/mapbox-gl-js, Mapbox GL JS docs guides [web:50][web:56]
+
+## PERFORMANCE
+- Debounce edits (lodash.debounce)
+- Virtualize markers (60fps critical)
+- Cleanup: map.remove() on unmount
