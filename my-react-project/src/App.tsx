@@ -6,6 +6,7 @@ import "@mapbox/mapbox-gl-geocoder/dist/mapbox-gl-geocoder.css";
 import "./App.css";
 import { attachDraw } from './map/draw';
 import { RadiusControl } from './components/RadiusControl';
+import TtcRoutes from './map/tileset';
 
 const INITIAL_CENTER: [number, number] = [-79.3662, 43.715];//long, lat - Toronto, Canada
 const INITIAL_ZOOM: number = 10.35;
@@ -188,6 +189,7 @@ export default function App() {
     <>
       <div id="map-container" ref={mapContainerRef} />
       <RadiusControl map={mapRef.current} />
+      
     </> 
   );
 }
