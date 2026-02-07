@@ -7,7 +7,7 @@
  */
 
 import 'dotenv/config';
-import { getBackboardClient, TORONTO_ASSISTANT_CONFIG, TORONTO_THREAD } from '../src/lib/backboard';
+import { getBackboardClient, TORONTO_THREAD } from '../src/lib/backboard';
 import { TORONTO_DOCS, TORONTO_PDF_SOURCES } from '../src/rag/toronto-docs';
 import type { IngestReport, UploadResult } from '../src/rag/types';
 import { existsSync } from 'fs';
@@ -31,14 +31,12 @@ async function main() {
 
   const client = getBackboardClient();
 
-  // ── Step 1: Get or Create Assistant ──
-  console.log('1️⃣  Setting up assistant...');
+  // ── Step 1: Get or Create Assistant (with improved prompt) ──
+  console.log('1️⃣  Setting up assistant (with improved focused prompts)...');
   let assistantId: string;
   try {
-    const assistant = await client.getOrCreateAssistant(
-      TORONTO_ASSISTANT_CONFIG.name,
-      TORONTO_ASSISTANT_CONFIG.systemPrompt
-    );
+    // Use improved assistant with better system prompt
+    const assistant = await client.getOrCreateImprovedAssistant();
     assistantId = assistant.assistant_id;
     console.log(`   ✅ Assistant: "${assistant.name}" (${assistantId})\n`);
   } catch (err) {

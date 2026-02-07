@@ -59,16 +59,21 @@ async function main() {
     console.log('   ⚠️  Could not list docs:', (err as Error).message);
   }
 
-  // Run test queries
-  console.log('\n🧪 Running test queries...\n');
+  // Run test queries with improved prompt formatting
+  console.log('\n🧪 Running test queries (with improved focused prompts)...\n');
   for (let i = 0; i < TEST_QUERIES.length; i++) {
     const query = TEST_QUERIES[i];
     console.log(`--- Query ${i + 1}/${TEST_QUERIES.length} ---`);
     console.log(`❓ ${query}\n`);
 
     try {
-      const result = await client.chat(threadId, query);
-      console.log(`💡 Answer: ${typeof result.answer === 'string' ? result.answer.substring(0, 300) : JSON.stringify(result.answer).substring(0, 300)}`);
+      // Use 'detailed' format for better answers with exact values
+      const result = await client.chat(threadId, query, { format: 'detailed' });
+      const answer = typeof result.answer === 'string' ? result.answer : JSON.stringify(result.answer);
+      
+      // Show full answer (not truncated) to see improvements
+      console.log(`💡 Answer:\n${answer}\n`);
+      
       if (result.sources && result.sources.length > 0) {
         console.log(`📄 Sources: ${result.sources.join(', ')}`);
       }
