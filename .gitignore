@@ -1,1 +1,22 @@
+# Environment files
 .env
+.env.*
+
+# Local tooling
+.venv/
+.cursor/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+
+# Local shell artifact files (do not track)
+nvm
+bash_completion
+Close
+Compressing
+=
