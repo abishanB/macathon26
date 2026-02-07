@@ -11,6 +11,10 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+!.env.example
+scripts/overpass_roads_raw.json
 
 # Editor directories and files
 .vscode/*
