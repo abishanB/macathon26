@@ -3,8 +3,7 @@ import { useRef, useEffect, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./App.css";
-import MapboxDraw from '@mapbox/mapbox-gl-draw';
-import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
+import { attachDraw } from './map/draw';
 
 const INITIAL_CENTER: [number, number] = [-79.3662, 43.715];//long, lat - Toronto, Canada
 const INITIAL_ZOOM: number = 10.35;
@@ -17,8 +16,8 @@ export default function App() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   //const [center, setCenter] = useState<[number, number]>(INITIAL_CENTER);//camera center
 
-  
 
+  
   useEffect(() => {
     mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
 
@@ -37,11 +36,7 @@ export default function App() {
 
     mapRef.current = map; // assign to ref once created
 
-    const draw = new MapboxDraw({
-      displayControlsDefault: false,
-      controls: { polygon: true, trash: true }
-    });
-    map.addControl(draw, 'top-left');
+    const { draw, detach } = attachDraw(map);
 
     // ensure a source/layer to render extrusions from Draw features
     const ensureUserSourceAndLayer = () => {
@@ -65,31 +60,57 @@ export default function App() {
 
     map.on('style.load', () => {
       ensureUserSourceAndLayer();
+      
+      // add city 3D buildings (insert before label symbols); lower minzoom so buildings are visible sooner
+      const layers = map.getStyle().layers || [];
+      const labelLayerId = layers.find(
+        (layer) => layer.type === 'symbol' && layer.layout && layer.layout['text-field']
+      )?.id;
+
+      if (!map.getLayer('add-3d-buildings')) {
+        map.addLayer(
+        {
+          id: 'add-3d-buildings',
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['==', 'extrude', 'true'],
+          type: 'fill-extrusion',
+          minzoom: 15,
+          paint: {
+            'fill-extrusion-color': '#aaa',
+            'fill-extrusion-height': [
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              15,
+              0,
+              15.05,
+              ['get', 'height']
+            ],
+            'fill-extrusion-base': [
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              15,
+              0,
+              15.05,
+              ['get', 'min_height']
+            ],
+            'fill-extrusion-opacity': 0.6
+          }
+        },
+        labelLayerId
+      );
+      }
     });
 
     // when user creates/updates/deletes shapes, copy Draw features to the geojson source
-    const updateFromDraw = () => {
-      const data = draw.getAll();
-      // set a default height property for each polygon feature if missing
-      data.features.forEach((f: any) => {
-        if (!f.properties) f.properties = {};
-        if (f.geometry?.type === 'Polygon' && f.properties.height == null) f.properties.height = 40;
-      });
-      if (map.getSource('user-shape')) {
-        (map.getSource('user-shape') as mapboxgl.GeoJSONSource).setData(data);
-      }
-    };
-
-    map.on('draw.create', updateFromDraw);
-    map.on('draw.update', updateFromDraw);
-    map.on('draw.delete', updateFromDraw);
+    // draw event handlers and control are attached inside `attachDraw`
 
     // cleanup
     return () => {
-      map.off('draw.create', updateFromDraw);
-      map.off('draw.update', updateFromDraw);
-      map.off('draw.delete', updateFromDraw);
-      map.removeControl(draw);
+      // detach draw handlers and control
+      try { detach(); } catch (e) {}
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
