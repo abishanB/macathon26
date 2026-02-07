@@ -7,11 +7,21 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "rag:ingest": "tsx scripts/ingest.ts",
+    "rag:test": "tsx scripts/test-rag.ts",
+    "rag:download-pdfs": "tsx scripts/download-pdfs.ts",
+    "rag:setup": "tsx scripts/download-pdfs.ts && tsx scripts/ingest.ts"
   },
   "dependencies": {
+    "@mapbox/mapbox-gl-draw": "^1.5.1",
+    "@mapbox/mapbox-gl-geocoder": "^5.1.2",
+    "@turf/turf": "^7.3.3",
+    "dotenv": "^17.2.4",
+    "mapbox-gl": "^3.18.1",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "tsx": "^4.21.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

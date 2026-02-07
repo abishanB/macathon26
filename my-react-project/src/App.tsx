@@ -1,9 +1,11 @@
-"use client";
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import MapboxGeocoder from "@mapbox/mapbox-gl-geocoder";
+import "@mapbox/mapbox-gl-geocoder/dist/mapbox-gl-geocoder.css";
 import "./App.css";
 import { attachDraw } from './map/draw';
+import { RadiusControl } from './components/RadiusControl';
 
 const INITIAL_CENTER: [number, number] = [-79.3662, 43.715];//long, lat - Toronto, Canada
 const INITIAL_ZOOM: number = 10.35;
@@ -14,15 +16,32 @@ const BEARING: number = -17.6;
 export default function App() {
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  //const [center, setCenter] = useState<[number, number]>(INITIAL_CENTER);//camera center
+  const geocoderRef = useRef<MapboxGeocoder | null>(null);
 
 
   
   useEffect(() => {
-    mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+    const accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+    
+    // Check if access token is set
+    if (!accessToken) {
+      console.error('❌ Mapbox access token is missing!');
+      console.error('Please create a .env file in my-react-project/ with:');
+      console.error('VITE_MAPBOX_ACCESS_TOKEN=your_token_here');
+      alert('Mapbox access token is missing. Please check the console for instructions.');
+      return;
+    }
+
+    mapboxgl.accessToken = accessToken;
+    console.log('✅ Mapbox token loaded');
 
     const container = mapContainerRef.current;
-    if (!container) return; // ensures it's not null
+    if (!container) {
+      console.error('❌ Map container not found');
+      return;
+    }
+    
+    console.log('🗺️ Initializing map...');
     
     const map = new mapboxgl.Map({
       container: container,
@@ -35,6 +54,50 @@ export default function App() {
     });
 
     mapRef.current = map; // assign to ref once created
+
+    // Add error handlers
+    map.on('error', (e) => {
+      console.error('❌ Map error:', e.error);
+      if (e.error?.message?.includes('token')) {
+        alert('Invalid Mapbox token. Please check your .env file.');
+      }
+    });
+
+    map.on('load', () => {
+      console.log('✅ Map loaded successfully');
+    });
+
+    // Add Geocoder search control
+    const geocoder = new MapboxGeocoder({
+      accessToken: mapboxgl.accessToken,
+      mapboxgl: mapboxgl,
+      placeholder: "Search for places, addresses, cities...",
+      marker: true, // Add a marker at the selected location
+      countries: undefined, // Search globally
+      proximity: {
+        longitude: INITIAL_CENTER[0],
+        latitude: INITIAL_CENTER[1]
+      }, // Bias results towards initial location
+      bbox: undefined, // Optional: limit search to a bounding box
+      types: 'address,poi,neighborhood,locality,place,district,postcode,region,country', // Search all types
+    });
+
+    // Add geocoder to map (position it in top-right)
+    map.addControl(geocoder, 'top-right');
+    geocoderRef.current = geocoder;
+
+    // Listen to geocoder results - this will trigger map movement and radius update
+    geocoder.on('result', (e) => {
+      const { result } = e;
+      console.log('Search result:', result);
+      // The map will automatically move to the result location
+      // The radius control will update via its map event listeners
+    });
+
+    // Optional: Handle geocoder errors
+    geocoder.on('error', (e) => {
+      console.error('Geocoder error:', e.error);
+    });
 
     const { draw, detach } = attachDraw(map);
 
@@ -111,6 +174,9 @@ export default function App() {
     return () => {
       // detach draw handlers and control
       try { detach(); } catch (e) {}
+      if (geocoderRef.current && mapRef.current) {
+        mapRef.current.removeControl(geocoderRef.current);
+      }
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
@@ -121,7 +187,7 @@ export default function App() {
   return (
     <>
       <div id="map-container" ref={mapContainerRef} />
-
+      <RadiusControl map={mapRef.current} />
     </> 
   );
 }
