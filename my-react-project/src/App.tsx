@@ -27,13 +27,7 @@ import {
 } from "./traffic/buildingClosures";
 import type { EdgeMetric, Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
 import { applyMetricsToRoads } from "./traffic/updateGeo";
-import { BuildingPlacer } from "./map/buildingPlacer";
-import { BuildingControls } from "./components/BuildingControls";
-import { BuildingInfoModal } from "./components/BuildingInfoModal";
-import { ImpactReportModal } from "./components/ImpactReportModal";
 import { SimulationResultsPanel } from "./components/SimulationResultsPanel";
-import type { Building, BuildingFormData, ImpactAnalysis } from "./types/building";
-import { getBackboardClient } from "./lib/backboard";
 import { fetchAndConvertMapboxStyle, type MapboxStyle } from "./utils/mapbox-style-converter";
 
 type RoadCollection = GeoJSON.FeatureCollection<GeoJSON.LineString, RoadFeatureProperties>;
@@ -73,6 +67,12 @@ const TRAFFIC_PARTICLE_MAX_COUNT = 420;
 const TRAFFIC_ROUTE_POOL_MAX = 1600;
 const TRAFFIC_PARTICLE_FRAME_MS = 90;
 const TRAFFIC_PARTICLE_SPEED_SCALE = 1.25;
+const POLYGON_BUILDINGS_SOURCE_ID = "polygon-buildings";
+const POLYGON_BUILDINGS_LAYER_ID = "polygon-buildings-3d";
+const POLYGON_BUILDINGS_OUTLINE_LAYER_ID = "polygon-buildings-outline";
+const RECTANGLE_PREVIEW_SOURCE_ID = "rectangle-preview";
+const RECTANGLE_PREVIEW_FILL_LAYER_ID = "rectangle-preview-fill";
+const RECTANGLE_PREVIEW_LINE_LAYER_ID = "rectangle-preview-line";
 
 const DEFAULT_STATS: SimulationStats = {
   nodes: 0,
@@ -213,19 +213,6 @@ type TrafficParticle = {
   position: [number, number];
 };
 
-function squareFootprintRing(building: Building): Array<[number, number]> {
-  const sizeMeters = Math.max(1, Math.sqrt(Math.max(1, building.footprint)));
-  const offsetDegrees = (sizeMeters / 2) / 111000;
-  const [lng, lat] = building.coordinates;
-  return [
-    [lng - offsetDegrees, lat - offsetDegrees],
-    [lng + offsetDegrees, lat - offsetDegrees],
-    [lng + offsetDegrees, lat + offsetDegrees],
-    [lng - offsetDegrees, lat + offsetDegrees],
-    [lng - offsetDegrees, lat - offsetDegrees],
-  ];
-}
-
 function asFeatureCollection(
   geojson: GeoJSON.GeoJSON | undefined,
 ): GeoJSON.FeatureCollection | null {
@@ -247,6 +234,80 @@ function mergeClosedFeatureSets(...sets: ReadonlyArray<ReadonlySet<number>>): Se
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function asPropertiesRecord(
+  properties: GeoJSON.GeoJsonProperties | null | undefined,
+): Record<string, unknown> {
+  if (!properties || typeof properties !== "object") {
+    return {};
+  }
+  return { ...properties } as Record<string, unknown>;
+}
+
+function extractBuildingId(
+  feature:
+    | GeoJSON.Feature
+    | maplibregl.MapGeoJSONFeature
+    | { id?: string | number; properties?: Record<string, unknown> },
+): string | null {
+  const idFromProperties = feature.properties?.id;
+  if (typeof idFromProperties === "string" || typeof idFromProperties === "number") {
+    return String(idFromProperties);
+  }
+  if (typeof feature.id === "string" || typeof feature.id === "number") {
+    return String(feature.id);
+  }
+  return null;
+}
+
+function rectangleCoordinates(
+  start: [number, number],
+  end: [number, number],
+): GeoJSON.Position[][] {
+  const [lng1, lat1] = start;
+  const [lng2, lat2] = end;
+  const minLng = Math.min(lng1, lng2);
+  const maxLng = Math.max(lng1, lng2);
+  const minLat = Math.min(lat1, lat2);
+  const maxLat = Math.max(lat1, lat2);
+  return [[
+    [minLng, minLat],
+    [maxLng, minLat],
+    [maxLng, maxLat],
+    [minLng, maxLat],
+    [minLng, minLat],
+  ]];
+}
+
+function createRectangleFeature(
+  id: string,
+  start: [number, number],
+  end: [number, number],
+  height: number,
+  selected = false,
+): GeoJSON.Feature<GeoJSON.Polygon> {
+  return {
+    type: "Feature",
+    id,
+    geometry: {
+      type: "Polygon",
+      coordinates: rectangleCoordinates(start, end),
+    },
+    properties: {
+      id,
+      height,
+      type: "rectangle-building",
+      baseHeight: 0,
+      selected,
+    },
+  };
+}
+
+function rectangleAreaTooSmall(start: [number, number], end: [number, number]): boolean {
+  const deltaLng = Math.abs(start[0] - end[0]);
+  const deltaLat = Math.abs(start[1] - end[1]);
+  return deltaLng < 0.00001 || deltaLat < 0.00001;
 }
 
 function emptyTrafficPointCollection(): GeoJSON.FeatureCollection<
@@ -542,12 +603,15 @@ export default function App() {
   const trafficAnimationFrameRef = useRef<number | null>(null);
   const trafficLastFrameRef = useRef(0);
   const recomputeTimerRef = useRef<number | null>(null);
-  const buildingPlacerRef = useRef<BuildingPlacer | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
   const polygonBuildingsRef = useRef<Map<string, GeoJSON.Feature>>(new Map());
+  const selectedPolygonBuildingIdRef = useRef<string | null>(null);
   const buildingModeRef = useRef(false);
-  const shapeModeRef = useRef<"none" | "rectangle">("none");
+  const drawModeRef = useRef(false);
   const rectHeightRef = useRef("40");
+  const rectangleDragActiveRef = useRef(false);
+  const rectangleDragStartRef = useRef<[number, number] | null>(null);
+  const rectangleDragCurrentRef = useRef<[number, number] | null>(null);
   const rectFirstCornerRef = useRef<[number, number] | null>(null);
 
   const [mapStyle, setMapStyle] = useState<MapboxStyle | string | null>(null);
@@ -560,30 +624,55 @@ export default function App() {
   const [isComputing, setIsComputing] = useState(false);
   const [stats, setStats] = useState<SimulationStats>(DEFAULT_STATS);
 
-  const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
-  const [showBuildingInfo, setShowBuildingInfo] = useState(false);
-  const [showImpactReport, setShowImpactReport] = useState(false);
-  const [impactAnalysis, setImpactAnalysis] = useState<ImpactAnalysis | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [selectedPolygonBuildingId, setSelectedPolygonBuildingId] = useState<string | null>(null);
   const [buildingMode, setBuildingMode] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
   const [showResultsPanel, setShowResultsPanel] = useState(false);
   const [polygonBuildings, setPolygonBuildings] = useState<Map<string, GeoJSON.Feature>>(new Map());
-  const [shapeMode, setShapeMode] = useState<"none" | "rectangle">("none");
   const [rectHeight, setRectHeight] = useState("40");
   const [rectFirstCorner, setRectFirstCorner] = useState<[number, number] | null>(null);
 
   useEffect(() => {
-    shapeModeRef.current = shapeMode;
-  }, [shapeMode]);
-
-  useEffect(() => {
     buildingModeRef.current = buildingMode;
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+    if (buildingMode) {
+      map.dragPan.disable();
+      map.doubleClickZoom.disable();
+      map.getCanvas().style.cursor = "crosshair";
+      setStatusText("Build mode enabled. Click and drag to add a building.");
+    } else {
+      map.dragPan.enable();
+      map.doubleClickZoom.enable();
+      map.getCanvas().style.cursor = "";
+      rectangleDragActiveRef.current = false;
+      rectangleDragStartRef.current = null;
+      rectangleDragCurrentRef.current = null;
+      rectFirstCornerRef.current = null;
+      setRectFirstCorner(null);
+      const previewSource = map.getSource(RECTANGLE_PREVIEW_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+      if (previewSource) {
+        previewSource.setData({
+          type: "FeatureCollection",
+          features: [],
+        });
+      }
+    }
   }, [buildingMode]);
 
   useEffect(() => {
     rectHeightRef.current = rectHeight;
   }, [rectHeight]);
+
+  useEffect(() => {
+    drawModeRef.current = drawMode;
+  }, [drawMode]);
+
+  useEffect(() => {
+    selectedPolygonBuildingIdRef.current = selectedPolygonBuildingId;
+  }, [selectedPolygonBuildingId]);
 
   useEffect(() => {
     rectFirstCornerRef.current = rectFirstCorner;
@@ -642,8 +731,8 @@ export default function App() {
   }, []);
 
   const ensurePolygonBuildingsLayer = useCallback((map: maplibregl.Map) => {
-    if (!map.getSource("polygon-buildings")) {
-      map.addSource("polygon-buildings", {
+    if (!map.getSource(POLYGON_BUILDINGS_SOURCE_ID)) {
+      map.addSource(POLYGON_BUILDINGS_SOURCE_ID, {
         type: "geojson",
         data: {
           type: "FeatureCollection",
@@ -652,13 +741,18 @@ export default function App() {
       });
     }
 
-    if (!map.getLayer("polygon-buildings-3d")) {
+    if (!map.getLayer(POLYGON_BUILDINGS_LAYER_ID)) {
       map.addLayer({
-        id: "polygon-buildings-3d",
+        id: POLYGON_BUILDINGS_LAYER_ID,
         type: "fill-extrusion",
-        source: "polygon-buildings",
+        source: POLYGON_BUILDINGS_SOURCE_ID,
         paint: {
-          "fill-extrusion-color": "#4A90E2",
+          "fill-extrusion-color": [
+            "case",
+            ["==", ["coalesce", ["get", "selected"], false], true],
+            "#f59e0b",
+            "#4A90E2",
+          ],
           "fill-extrusion-height": ["get", "height"],
           "fill-extrusion-base": ["get", "baseHeight"],
           "fill-extrusion-opacity": 0.8,
@@ -666,14 +760,16 @@ export default function App() {
       });
     }
 
-    if (!map.getLayer("polygon-buildings-outline")) {
+    if (!map.getLayer(POLYGON_BUILDINGS_OUTLINE_LAYER_ID)) {
       map.addLayer({
-        id: "polygon-buildings-outline",
+        id: POLYGON_BUILDINGS_OUTLINE_LAYER_ID,
         type: "line",
-        source: "polygon-buildings",
+        source: POLYGON_BUILDINGS_SOURCE_ID,
+        filter: ["==", ["coalesce", ["get", "selected"], false], true],
         paint: {
-          "line-color": "#2E5C8A",
-          "line-width": 2,
+          "line-color": "#ffd166",
+          "line-width": 3,
+          "line-opacity": 1,
         },
       });
     }
@@ -682,7 +778,7 @@ export default function App() {
   const updatePolygonBuildingsSource = useCallback(
     (map: maplibregl.Map, buildings: Map<string, GeoJSON.Feature>) => {
       ensurePolygonBuildingsLayer(map);
-      const source = map.getSource("polygon-buildings") as maplibregl.GeoJSONSource | undefined;
+      const source = map.getSource(POLYGON_BUILDINGS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
       if (!source) {
         return;
       }
@@ -694,6 +790,69 @@ export default function App() {
     },
     [ensurePolygonBuildingsLayer],
   );
+
+  const ensureRectanglePreviewLayer = useCallback((map: maplibregl.Map) => {
+    if (!map.getSource(RECTANGLE_PREVIEW_SOURCE_ID)) {
+      map.addSource(RECTANGLE_PREVIEW_SOURCE_ID, {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection",
+          features: [],
+        },
+      });
+    }
+
+    if (!map.getLayer(RECTANGLE_PREVIEW_FILL_LAYER_ID)) {
+      map.addLayer({
+        id: RECTANGLE_PREVIEW_FILL_LAYER_ID,
+        type: "fill",
+        source: RECTANGLE_PREVIEW_SOURCE_ID,
+        paint: {
+          "fill-color": "#f59e0b",
+          "fill-opacity": 0.16,
+        },
+      });
+    }
+
+    if (!map.getLayer(RECTANGLE_PREVIEW_LINE_LAYER_ID)) {
+      map.addLayer({
+        id: RECTANGLE_PREVIEW_LINE_LAYER_ID,
+        type: "line",
+        source: RECTANGLE_PREVIEW_SOURCE_ID,
+        paint: {
+          "line-color": "#f59e0b",
+          "line-width": 2,
+          "line-dasharray": [2, 2],
+        },
+      });
+    }
+  }, []);
+
+  const updateRectanglePreview = useCallback(
+    (map: maplibregl.Map, start: [number, number], end: [number, number], height: number) => {
+      ensureRectanglePreviewLayer(map);
+      const source = map.getSource(RECTANGLE_PREVIEW_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+      if (!source) {
+        return;
+      }
+      source.setData({
+        type: "FeatureCollection",
+        features: [createRectangleFeature("rectangle-preview", start, end, height, false)],
+      });
+    },
+    [ensureRectanglePreviewLayer],
+  );
+
+  const clearRectanglePreview = useCallback((map: maplibregl.Map) => {
+    const source = map.getSource(RECTANGLE_PREVIEW_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+    if (!source) {
+      return;
+    }
+    source.setData({
+      type: "FeatureCollection",
+      features: [],
+    });
+  }, []);
 
   const ensureTrafficParticleLayer = useCallback((map: maplibregl.Map) => {
     if (!map.getSource(TRAFFIC_PARTICLE_SOURCE_ID)) {
@@ -815,26 +974,95 @@ export default function App() {
     trafficAnimationFrameRef.current = window.requestAnimationFrame(animate);
   }, [ensureTrafficParticleLayer, stopTrafficParticleAnimation, updateTrafficParticleSource]);
 
-  const addPolygonBuilding = useCallback(
-    (map: maplibregl.Map, feature: GeoJSON.Feature) => {
+  const setPolygonBuildingSelection = useCallback(
+    (map: maplibregl.Map, nextSelectedId: string | null) => {
+      let selectedHeight: number | null = null;
+      let resolvedSelectedId: string | null = nextSelectedId;
       setPolygonBuildings((prev) => {
-        const next = new Map(prev);
-        next.set(String(feature.id), feature);
+        if (nextSelectedId && !prev.has(nextSelectedId)) {
+          resolvedSelectedId = null;
+        }
+        const next = new Map<string, GeoJSON.Feature>();
+        for (const [id, feature] of prev.entries()) {
+          const properties = asPropertiesRecord(feature.properties);
+          const isSelected = id === resolvedSelectedId;
+          if (isSelected) {
+            const heightValue = Number.parseFloat(String(properties.height));
+            if (Number.isFinite(heightValue)) {
+              selectedHeight = heightValue;
+            }
+          }
+          next.set(id, {
+            ...feature,
+            properties: {
+              ...properties,
+              selected: isSelected,
+            },
+          });
+        }
         polygonBuildingsRef.current = next;
         updatePolygonBuildingsSource(map, next);
         return next;
       });
+      setSelectedPolygonBuildingId(resolvedSelectedId);
+      if (selectedHeight !== null) {
+        setRectHeight(String(selectedHeight));
+      }
+      if (resolvedSelectedId) {
+        console.log("[BUILDING SELECT] Selected building", { id: resolvedSelectedId });
+      } else {
+        console.log("[BUILDING SELECT] Cleared building selection");
+      }
+    },
+    [updatePolygonBuildingsSource],
+  );
+
+  const addPolygonBuilding = useCallback(
+    (map: maplibregl.Map, feature: GeoJSON.Feature) => {
+      const buildingId = extractBuildingId(feature) ?? `rect-${Date.now()}`;
+      const rawProperties = asPropertiesRecord(feature.properties);
+      const heightValue = Math.max(1, Number.parseFloat(String(rawProperties.height ?? rectHeightRef.current)) || 20);
+
+      setPolygonBuildings((prev) => {
+        const next = new Map<string, GeoJSON.Feature>();
+        for (const [id, existingFeature] of prev.entries()) {
+          const existingProperties = asPropertiesRecord(existingFeature.properties);
+          next.set(id, {
+            ...existingFeature,
+            properties: {
+              ...existingProperties,
+              selected: false,
+            },
+          });
+        }
+
+        next.set(buildingId, {
+          ...feature,
+          id: buildingId,
+          properties: {
+            ...rawProperties,
+            id: buildingId,
+            height: heightValue,
+            type: rawProperties.type ?? "rectangle-building",
+            baseHeight: rawProperties.baseHeight ?? 0,
+            selected: true,
+          },
+        });
+
+        polygonBuildingsRef.current = next;
+        updatePolygonBuildingsSource(map, next);
+        return next;
+      });
+
+      setSelectedPolygonBuildingId(buildingId);
+      setRectHeight(String(heightValue));
+      console.log("[BUILDING ADD] Added building", { id: buildingId, height: heightValue });
     },
     [updatePolygonBuildingsSource],
   );
 
   const collectBuildingRings = useCallback((): Array<[number, number][]> => {
     const rings: Array<[number, number][]> = [];
-
-    const placedBuildings = buildingPlacerRef.current?.getAllBuildings() ?? [];
-    for (const building of placedBuildings) {
-      rings.push(squareFootprintRing(building));
-    }
 
     for (const feature of polygonBuildingsRef.current.values()) {
       rings.push(...extractPolygonRings(feature));
@@ -1133,6 +1361,7 @@ export default function App() {
     const handleStyleLoad = () => {
       ensureUserSourceAndLayer();
       ensurePolygonBuildingsLayer(map);
+      ensureRectanglePreviewLayer(map);
       updatePolygonBuildingsSource(map, polygonBuildingsRef.current);
       ensureTrafficParticleLayer(map);
       bringTrafficParticlesToFront(map);
@@ -1184,35 +1413,18 @@ export default function App() {
         setStatusText(`Road load failed: ${message}`);
       });
 
-      // Initialize building placer
-      const placer = new BuildingPlacer(map, {
-        onBuildingPlaced: (building) => {
-          console.log("Building placed:", building);
-          setSelectedBuilding(building);
-          setBuildingMode(false); // Exit building mode after placement
-          scheduleSimulation(0);
-        },
-        onBuildingSelected: (building) => {
-          setSelectedBuilding(building);
-        },
-        onBuildingUpdated: (building) => {
-          setSelectedBuilding(building);
-          scheduleSimulation(120);
-        },
-      });
-      buildingPlacerRef.current = placer;
-
       // Initialize Draw Polygon control (positioned below navigation controls on left)
       const drawControl = new DrawPolygonControl((active) => {
         console.log(`✏️ [DRAW POLYGON] Mode ${active ? "enabled" : "disabled"}`);
         setDrawMode(active);
         if (active) {
           setBuildingMode(false);
-          buildingPlacerRef.current?.disablePlacementMode();
-          shapeModeRef.current = "none";
+          rectangleDragActiveRef.current = false;
+          rectangleDragStartRef.current = null;
+          rectangleDragCurrentRef.current = null;
           rectFirstCornerRef.current = null;
-          setShapeMode("none");
           setRectFirstCorner(null);
+          clearRectanglePreview(map);
         }
       });
     
@@ -1253,15 +1465,24 @@ export default function App() {
 
       const handlePolygonDelete = (e: any) => {
         console.log("🗑️ [POLYGON DRAW] Polygon deleted", e);
+        const removedIds = new Set<string>(e.features.map((feature: any) => String(feature.id)));
         setPolygonBuildings((prev) => {
-          const next = new Map(prev);
-          e.features.forEach((feature: any) => {
-            next.delete(String(feature.id));
+          const next = new Map<string, GeoJSON.Feature>(prev);
+          removedIds.forEach((featureId) => {
+            if (next.has(featureId)) {
+              console.log("[BUILDING DELETE] Removed polygon building", { id: featureId });
+            }
+            next.delete(featureId);
           });
           polygonBuildingsRef.current = next;
           updatePolygonBuildingsSource(map, next);
           return next;
         });
+        const selectedId = selectedPolygonBuildingIdRef.current;
+        if (selectedId && removedIds.has(selectedId)) {
+          selectedPolygonBuildingIdRef.current = null;
+          setSelectedPolygonBuildingId(null);
+        }
         scheduleSimulation(0);
       };
 
@@ -1275,69 +1496,68 @@ export default function App() {
       (map as any)._polygonHandlers = { create: handlePolygonCreate, update: handlePolygonUpdate, delete: handlePolygonDelete };
     };
 
+    const handleMapMouseDown = (event: maplibregl.MapMouseEvent) => {
+      if (!buildingModeRef.current || drawModeRef.current) {
+        return;
+      }
+      const dragStart: [number, number] = [event.lngLat.lng, event.lngLat.lat];
+      rectangleDragActiveRef.current = true;
+      rectangleDragStartRef.current = dragStart;
+      rectangleDragCurrentRef.current = dragStart;
+      rectFirstCornerRef.current = dragStart;
+      setRectFirstCorner(dragStart);
+      const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
+      updateRectanglePreview(map, dragStart, dragStart, heightValue);
+      setStatusText("Drag to define building footprint.");
+    };
+
+    const handleMapMouseUp = (event: maplibregl.MapMouseEvent) => {
+      if (!rectangleDragActiveRef.current) {
+        return;
+      }
+      rectangleDragActiveRef.current = false;
+      const dragStart = rectangleDragStartRef.current;
+      rectangleDragStartRef.current = null;
+      rectangleDragCurrentRef.current = null;
+      rectFirstCornerRef.current = null;
+      setRectFirstCorner(null);
+      clearRectanglePreview(map);
+      if (!dragStart) {
+        return;
+      }
+
+      const dragEnd: [number, number] = [event.lngLat.lng, event.lngLat.lat];
+      if (rectangleAreaTooSmall(dragStart, dragEnd)) {
+        setStatusText("Building not added. Drag a larger rectangle.");
+        return;
+      }
+
+      const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
+      const buildingId = `rect-${Date.now()}`;
+      const buildingFeature = createRectangleFeature(buildingId, dragStart, dragEnd, heightValue, true);
+      addPolygonBuilding(map, buildingFeature);
+      scheduleSimulation(0);
+      setStatusText(`Building created (height ${heightValue}m).`);
+    };
+
     const handleMapClick = (event: maplibregl.MapMouseEvent) => {
-      if (shapeModeRef.current === "rectangle") {
-        const lng = event.lngLat.lng;
-        const lat = event.lngLat.lat;
-        if (!rectFirstCornerRef.current) {
-          const firstCorner: [number, number] = [lng, lat];
-          rectFirstCornerRef.current = firstCorner;
-          setRectFirstCorner(firstCorner);
-          setStatusText("First corner set. Click the opposite corner to create the building.");
-          return;
-        }
-
-        const firstCorner = rectFirstCornerRef.current;
-        if (!firstCorner) {
-          return;
-        }
-        const [lng1, lat1] = firstCorner;
-        const minLng = Math.min(lng1, lng);
-        const maxLng = Math.max(lng1, lng);
-        const minLat = Math.min(lat1, lat);
-        const maxLat = Math.max(lat1, lat);
-        const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
-        const buildingId = `rect-${Date.now()}`;
-
-        const buildingFeature: GeoJSON.Feature = {
-          type: "Feature",
-          id: buildingId,
-          geometry: {
-            type: "Polygon",
-            coordinates: [
-              [
-                [minLng, minLat],
-                [maxLng, minLat],
-                [maxLng, maxLat],
-                [minLng, maxLat],
-                [minLng, minLat],
-              ],
-            ],
-          },
-          properties: {
-            height: heightValue,
-            type: "rectangle-building",
-            baseHeight: 0,
-          },
-        };
-
-        addPolygonBuilding(map, buildingFeature);
-        scheduleSimulation(0);
-        rectFirstCornerRef.current = null;
-        setRectFirstCorner(null);
-        setStatusText(`Building created (height ${heightValue}m). Click two corners to add another.`);
-        return;
-      }
-
-      if (buildingModeRef.current) {
-        return;
-      }
-
       const buildingFeatures = map.queryRenderedFeatures(event.point, {
-        layers: ["placed-buildings-3d"],
+        layers: [POLYGON_BUILDINGS_LAYER_ID],
       });
       if (buildingFeatures.length > 0) {
+        const buildingId = extractBuildingId(buildingFeatures[0]);
+        if (buildingId) {
+          setPolygonBuildingSelection(map, buildingId);
+        }
         return;
+      }
+
+      if (buildingModeRef.current || drawModeRef.current) {
+        return;
+      }
+
+      if (selectedPolygonBuildingIdRef.current) {
+        setPolygonBuildingSelection(map, null);
       }
 
       if (!map.getLayer(ROAD_LAYER_IDS.heat)) {
@@ -1390,8 +1610,25 @@ export default function App() {
         lat: Number(event.lngLat.lat.toFixed(6)),
       });
 
+      if (rectangleDragActiveRef.current) {
+        const dragStart = rectangleDragStartRef.current;
+        if (dragStart) {
+          const dragCurrent: [number, number] = [event.lngLat.lng, event.lngLat.lat];
+          rectangleDragCurrentRef.current = dragCurrent;
+          const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
+          updateRectanglePreview(map, dragStart, dragCurrent, heightValue);
+        }
+        map.getCanvas().style.cursor = "crosshair";
+        return;
+      }
+
+      if (buildingModeRef.current && !drawModeRef.current) {
+        map.getCanvas().style.cursor = "crosshair";
+        return;
+      }
+
       const buildingFeatures = map.queryRenderedFeatures(event.point, {
-        layers: ["placed-buildings-3d"],
+        layers: [POLYGON_BUILDINGS_LAYER_ID],
       });
       if (buildingFeatures.length > 0) {
         map.getCanvas().style.cursor = "pointer";
@@ -1410,10 +1647,12 @@ export default function App() {
 
     const handleMouseLeave = () => {
       setCursorCoordinates(null);
-      map.getCanvas().style.cursor = "";
+      map.getCanvas().style.cursor = buildingModeRef.current ? "crosshair" : "";
     };
 
     map.on("style.load", handleStyleLoad);
+    map.on("mousedown", handleMapMouseDown);
+    map.on("mouseup", handleMapMouseUp);
     map.on("click", handleMapClick);
     map.on("mousemove", handleMouseMove);
     map.on("mouseleave", handleMouseLeave);
@@ -1426,7 +1665,6 @@ export default function App() {
       trafficParticlesRef.current = [];
       trafficRoutePoolRef.current = [];
       trafficEdgeMetricsRef.current = new Map();
-      buildingPlacerRef.current?.destroy();
       if (drawControlRef.current) {
         const handlers = (map as any)._polygonHandlers;
         if (handlers) {
@@ -1442,6 +1680,8 @@ export default function App() {
         // no-op
       }
       map.off("style.load", handleStyleLoad);
+      map.off("mousedown", handleMapMouseDown);
+      map.off("mouseup", handleMapMouseUp);
       map.off("click", handleMapClick);
       map.off("mousemove", handleMouseMove);
       map.off("mouseleave", handleMouseLeave);
@@ -1452,13 +1692,17 @@ export default function App() {
   }, [
     addPolygonBuilding,
     bringTrafficParticlesToFront,
+    clearRectanglePreview,
+    ensureRectanglePreviewLayer,
     ensurePolygonBuildingsLayer,
     ensureTrafficParticleLayer,
     loadRoadNetwork,
     mapStyle,
     refreshCustomBuildings,
     scheduleSimulation,
+    setPolygonBuildingSelection,
     stopTrafficParticleAnimation,
+    updateRectanglePreview,
     updatePolygonBuildingsSource,
   ]);
 
@@ -1482,48 +1726,96 @@ export default function App() {
 
   // Building placement handlers
   const handleToggleBuildingMode = useCallback(() => {
-    console.log("🏗️ [BUILDING MODE] Toggling building placement mode...");
+    console.log("[BUILD MODE] Toggling build mode");
     setBuildingMode((prev) => {
       const newMode = !prev;
       if (newMode) {
-        console.log("✅ [BUILDING MODE] Enabled - Click map to place building");
-        buildingPlacerRef.current?.enablePlacementMode();
-        shapeModeRef.current = "none";
-        rectFirstCornerRef.current = null;
-        setShapeMode("none");
-        setRectFirstCorner(null);
-        setDrawMode(false); // Disable draw mode when entering building mode
+        console.log("[BUILD MODE] Enabled");
+        setDrawMode(false);
         drawControlRef.current?.setActive(false);
       } else {
-        console.log("❌ [BUILDING MODE] Disabled");
-        buildingPlacerRef.current?.disablePlacementMode();
+        console.log("[BUILD MODE] Disabled");
       }
       return newMode;
     });
   }, []);
 
-  const handleShapeModeChange = useCallback((mode: "none" | "rectangle") => {
-    setShapeMode(mode);
-    rectFirstCornerRef.current = null;
-    setRectFirstCorner(null);
-    shapeModeRef.current = mode;
-    if (mode !== "none") {
-      setBuildingMode(false);
-      buildingPlacerRef.current?.disablePlacementMode();
-      setDrawMode(false);
-      drawControlRef.current?.setActive(false);
+  const handleDeleteSelectedBuilding = useCallback(() => {
+    const selectedId = selectedPolygonBuildingIdRef.current;
+    const map = mapRef.current;
+    if (!selectedId || !map) {
+      return;
     }
-  }, []);
 
-  const handleBuildingUpdate = useCallback((updates: Partial<Building>) => {
-    if (selectedBuilding) {
-      buildingPlacerRef.current?.updateBuilding(selectedBuilding.id, updates);
-    }
-  }, [selectedBuilding]);
+    setPolygonBuildings((prev) => {
+      if (!prev.has(selectedId)) {
+        return prev;
+      }
+      const next = new Map(prev);
+      next.delete(selectedId);
+      polygonBuildingsRef.current = next;
+      updatePolygonBuildingsSource(map, next);
+      return next;
+    });
+
+    selectedPolygonBuildingIdRef.current = null;
+    setSelectedPolygonBuildingId(null);
+    console.log("[BUILDING DELETE] Deleted selected building", { id: selectedId });
+    scheduleSimulation(0);
+    setStatusText("Selected building deleted.");
+  }, [scheduleSimulation, updatePolygonBuildingsSource]);
+
+  const handleRectHeightChange = useCallback(
+    (value: string) => {
+      setRectHeight(value);
+      const heightValue = clampNumber(Math.max(1, Number.parseFloat(value) || 20), 1, 300);
+      const map = mapRef.current;
+      const selectedId = selectedPolygonBuildingIdRef.current;
+
+      if (map && rectangleDragActiveRef.current) {
+        const dragStart = rectangleDragStartRef.current;
+        const dragCurrent = rectangleDragCurrentRef.current;
+        if (dragStart && dragCurrent) {
+          updateRectanglePreview(map, dragStart, dragCurrent, heightValue);
+        }
+      }
+
+      if (!map || !selectedId) {
+        return;
+      }
+
+      setPolygonBuildings((prev) => {
+        const selectedFeature = prev.get(selectedId);
+        if (!selectedFeature) {
+          return prev;
+        }
+        const next = new Map(prev);
+        const properties = asPropertiesRecord(selectedFeature.properties);
+        next.set(selectedId, {
+          ...selectedFeature,
+          properties: {
+            ...properties,
+            height: heightValue,
+            selected: true,
+          },
+        });
+        polygonBuildingsRef.current = next;
+        updatePolygonBuildingsSource(map, next);
+        return next;
+      });
+
+      console.log("[BUILDING UPDATE] Updated selected building height", {
+        id: selectedId,
+        height: heightValue,
+      });
+      scheduleSimulation(120);
+    },
+    [scheduleSimulation, updatePolygonBuildingsSource, updateRectanglePreview],
+  );
 
   useEffect(() => {
     const handleBackspaceDelete = (event: KeyboardEvent) => {
-      if (event.key !== "Backspace" || !selectedBuilding) {
+      if (event.key !== "Backspace" || !selectedPolygonBuildingIdRef.current) {
         return;
       }
 
@@ -1541,115 +1833,14 @@ export default function App() {
       }
 
       event.preventDefault();
-      buildingPlacerRef.current?.deleteBuilding(selectedBuilding.id);
-      setSelectedBuilding(null);
-      scheduleSimulation(0);
+      handleDeleteSelectedBuilding();
     };
 
     window.addEventListener("keydown", handleBackspaceDelete);
     return () => {
       window.removeEventListener("keydown", handleBackspaceDelete);
     };
-  }, [scheduleSimulation, selectedBuilding]);
-
-  const handleAnalyzeBuilding = useCallback(() => {
-    if (selectedBuilding) {
-      setShowBuildingInfo(true);
-    }
-  }, [selectedBuilding]);
-
-  const handleBuildingInfoSubmit = useCallback(async (formData: BuildingFormData) => {
-    if (!selectedBuilding) return;
-
-    setShowBuildingInfo(false);
-    setIsAnalyzing(true);
-    setStatusText("Analyzing construction impact...");
-
-    try {
-      const client = getBackboardClient();
-      const assistant = await client.getOrCreateImprovedAssistant();
-      const thread = await client.createThreadForAssistant(assistant.assistant_id);
-
-      const analysis = await client.analyzeConstructionImpact(thread.thread_id, {
-        location: selectedBuilding.coordinates,
-        buildingType: formData.buildingType,
-        stories: formData.stories,
-        footprint: formData.footprintWidth * formData.footprintLength,
-        duration: formData.constructionDuration,
-        laneClosures: formData.laneClosures,
-        parkingLost: formData.parkingSpacesLost,
-        deliveryTrucks: formData.deliveryTrucksPerDay,
-        excavationDepth: formData.excavationDepth,
-        workHours: {
-          start: formData.workHoursStart,
-          end: formData.workHoursEnd,
-          weekend: formData.weekendWork,
-          night: formData.nightWork,
-        },
-        dustControl: formData.dustControl,
-        noiseControl: formData.noiseControl,
-        expectedOccupancy: formData.expectedOccupancy,
-      });
-
-      // Convert the analysis to ImpactAnalysis type
-      const impactAnalysis: ImpactAnalysis = {
-        trafficCongestion: {
-          peakHourDelay: analysis.trafficImpact?.peakHourDelay || 0,
-          averageDelay: analysis.trafficImpact?.estimatedDelay || 0,
-          affectedRoutes: analysis.trafficImpact?.affectedRoutes || [],
-          detourRequired: analysis.trafficImpact?.detourRequired || false,
-          transitRoutesAffected: [],
-        },
-        environmental: {
-          airQuality: {
-            pm10Increase: analysis.environmental?.airQuality?.pm10Estimate || 0,
-            pm25Increase: analysis.environmental?.airQuality?.pm25Estimate || 0,
-            complianceStatus: (analysis.environmental?.airQuality?.complianceStatus as any) || 'compliant',
-          },
-          noise: {
-            peakLevel: analysis.environmental?.noise?.peakNoiseLevel || 0,
-            exceedsLimits: analysis.environmental?.noise?.exceedsLimits || false,
-            affectedResidents: 0,
-            mitigationRequired: analysis.environmental?.noise?.mitigationRequired || false,
-          },
-          dust: {
-            level: (analysis.environmental?.airQuality?.dustLevel as any) || 'low',
-            controlMeasuresRequired: [],
-          },
-        },
-        economic: {
-          businessImpact: (analysis.economicImpact?.businessImpact as any) || 'minimal',
-          estimatedRevenueLoss: analysis.economicImpact?.estimatedBusinessLoss || 0,
-          affectedBusinesses: analysis.economicImpact?.affectedBusinessCount || 0,
-        },
-        compliance: {
-          requiredPermits: analysis.compliance?.requiredPermits || [],
-          trafficManagementPlanRequired: analysis.compliance?.trafficManagementPlanRequired || false,
-          environmentalAssessmentRequired: analysis.compliance?.environmentalAssessment || false,
-          communityConsultationRequired: analysis.compliance?.communityConsultation || false,
-          mitigationMeasures: analysis.compliance?.mitigationMeasures || [],
-        },
-        overall: {
-          riskLevel: (analysis.overall?.riskLevel as any) || 'medium',
-          recommendedActions: analysis.overall?.recommendedActions || [],
-          estimatedTotalImpact: analysis.overall?.estimatedTotalImpact || '',
-          severity:
-            typeof analysis.overall?.severity === "number" ? analysis.overall.severity : 5,
-        },
-        sources: analysis.sources || [],
-        narrative: analysis.narrative || 'Analysis completed.',
-      };
-
-      setImpactAnalysis(impactAnalysis);
-      setShowImpactReport(true);
-      setStatusText("Impact analysis completed");
-    } catch (error) {
-      console.error("Failed to analyze construction impact:", error);
-      setStatusText("Failed to analyze impact. Check console for details.");
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [selectedBuilding]);
+  }, [handleDeleteSelectedBuilding]);
 
   return (
     <div className="app-shell">
@@ -1657,7 +1848,7 @@ export default function App() {
 
       <section className="controls">
         <h1>Toronto Reactive Traffic Heatmap</h1>
-        <p className="status">{isComputing || isAnalyzing ? "Computing..." : statusText}</p>
+        <p className="status">{isComputing ? "Computing..." : statusText}</p>
         <div className="actions">
           <button type="button" onClick={handleManualRecompute}>
             Recompute
@@ -1669,11 +1860,11 @@ export default function App() {
             type="button"
             onClick={handleToggleBuildingMode}
             style={{
-              backgroundColor: buildingMode ? '#28a745' : '#6c757d',
-              color: 'white',
+              backgroundColor: buildingMode ? "#28a745" : "#6c757d",
+              color: "white",
             }}
           >
-            {buildingMode ? '✓ Building Mode' : '+ Add Building'}
+            {buildingMode ? "Switch to Free Move" : "Switch to Build Mode"}
           </button>
         </div>
         <div className="stats">
@@ -1688,14 +1879,12 @@ export default function App() {
         </div>
         <p className="hint">
           {buildingMode
-            ? 'Click on the map to place a building'
-            : shapeMode === "rectangle"
             ? rectFirstCorner
-              ? 'Rectangle mode: pick the opposite corner.'
-              : 'Rectangle mode: click first corner, then opposite corner.'
+              ? "Build mode: drag to finish this building footprint."
+              : "Build mode: click and drag once to create a building footprint."
             : drawMode
-            ? 'Click to draw polygon vertices. Double-click or click first point to complete.'
-            : 'Click a building to select it (outline shown), then press Backspace to delete. Click roads to toggle closures.'}
+              ? "Polygon draw mode active."
+              : "Free move mode: click roads to toggle closures and click buildings to select."}
         </p>
         <div className="legend">
           <span className="chip flow-good">delay 1.0</span>
@@ -1707,86 +1896,41 @@ export default function App() {
       </section>
 
       <section className="shape-panel">
-        <h2>Shape Builder</h2>
+        <h2>Add Building</h2>
         <div className="shape-row">
-          <label htmlFor="shape-select">Shape</label>
-          <select
-            id="shape-select"
-            value={shapeMode}
-            onChange={(e) => handleShapeModeChange(e.target.value as "none" | "rectangle")}
-          >
-            <option value="none">None</option>
-            <option value="rectangle">Building (Rectangle)</option>
-          </select>
-        </div>
-        <div className="shape-row">
-          <label htmlFor="shape-height">Height (m)</label>
+          <label htmlFor="shape-height">
+            Height: {Math.max(1, Number.parseFloat(rectHeight) || 20).toFixed(0)} m
+          </label>
           <input
             id="shape-height"
-            type="number"
+            type="range"
             min="1"
-            value={rectHeight}
-            onChange={(e) => setRectHeight(e.target.value)}
+            max="300"
+            step="1"
+            value={Math.max(1, Number.parseFloat(rectHeight) || 20)}
+            onChange={(e) => handleRectHeightChange(e.target.value)}
           />
         </div>
         <p className="shape-help">
-          {shapeMode === "rectangle"
-            ? rectFirstCorner
-              ? "First corner set. Click the opposite corner to finish."
-              : "Select two corners on the map to place a building."
-            : "Choose a shape to begin drawing on the map."}
+          {selectedPolygonBuildingId
+            ? `Selected: ${selectedPolygonBuildingId}`
+            : "No building selected. Click one to select it."}
         </p>
-        {shapeMode === "rectangle" && rectFirstCorner && (
-          <button
-            type="button"
-            className="shape-cancel"
-            onClick={() => {
-              rectFirstCornerRef.current = null;
-              setRectFirstCorner(null);
-            }}
-          >
-            Cancel Corner
-          </button>
-        )}
-        {shapeMode !== "none" && (
-          <button
-            type="button"
-            className="shape-cancel"
-            onClick={() => handleShapeModeChange("none")}
-          >
-            Exit Shape Mode
-          </button>
-        )}
+        <button
+          type="button"
+          className="shape-cancel"
+          onClick={handleDeleteSelectedBuilding}
+          disabled={!selectedPolygonBuildingId}
+        >
+          Delete Selected Building
+        </button>
       </section>
-
-      {selectedBuilding && (
-        <BuildingControls
-          building={selectedBuilding}
-          onUpdate={handleBuildingUpdate}
-          onAnalyze={handleAnalyzeBuilding}
-        />
-      )}
-
-      {showBuildingInfo && selectedBuilding && (
-        <BuildingInfoModal
-          building={selectedBuilding}
-          onSubmit={handleBuildingInfoSubmit}
-          onCancel={() => setShowBuildingInfo(false)}
-        />
-      )}
-
-      {showImpactReport && impactAnalysis && (
-        <ImpactReportModal
-          analysis={impactAnalysis}
-          onClose={() => setShowImpactReport(false)}
-        />
-      )}
 
       <SimulationResultsPanel
         stats={stats}
         isVisible={showResultsPanel}
         onClose={() => setShowResultsPanel(false)}
-        buildingCount={polygonBuildings.size + (selectedBuilding ? 1 : 0)}
+        buildingCount={polygonBuildings.size}
         closedRoads={stats.closed}
       />
 

@@ -135,6 +135,11 @@ body,
   font-family: inherit;
 }
 
+.shape-row input[type="range"] {
+  padding: 0;
+  accent-color: #28a745;
+}
+
 .shape-help {
   margin: 6px 0 10px;
   font-size: 12px;
@@ -155,6 +160,11 @@ body,
 
 .shape-cancel:hover {
   opacity: 0.9;
+}
+
+.shape-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .chip {
