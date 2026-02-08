@@ -13,6 +13,6 @@ export function initMap(container: HTMLDivElement): maplibregl.Map {
     antialias: true,
   });
 
-  map.addControl(new maplibregl.NavigationControl(), "top-right");
+
   return map;
 }

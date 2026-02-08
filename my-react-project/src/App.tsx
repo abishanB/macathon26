@@ -560,7 +560,7 @@ export default function App() {
       maxZoom: MAX_ZOOM,
       antialias: true,
     });
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
+   
     mapRef.current = map;
 
     const { detach } = attachDraw(map);
