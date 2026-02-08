@@ -5,6 +5,7 @@ import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <title> 6ixthSense </title>
     <App />
   </StrictMode>,
 )
