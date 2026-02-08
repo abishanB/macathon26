@@ -411,7 +411,10 @@ Keep response concise, specific, and Toronto-focused. Use plain language for cit
     }
 
     analyzeNearbyBuildingsImpact();
-  }, [nearbyBuildings, buildingCount, closedRoads, stats.closed, isVisible, isMinimized]);
+  }, [nearbyBuildings, isVisible, isMinimized]);
+  // Note: buildingCount, closedRoads, stats.closed are intentionally NOT in deps
+  // They're used to build the query but shouldn't trigger re-analysis
+  // AI should only analyze once per location change (when nearbyBuildings changes)
 
   if (!isVisible) return null;
 
