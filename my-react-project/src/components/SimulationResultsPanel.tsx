@@ -394,7 +394,11 @@ Keep response concise, specific, and Toronto-focused. Use plain language for cit
         }
 
         const result = await response.json();
-        const analysis = result.answer || result.content || result.message || '';
+        let analysis = result.answer || result.content || result.message || '';
+        
+        // Strip markdown formatting (bold markers **)
+        analysis = analysis.replace(/\*\*/g, '');
+        
         console.log('[AI Analysis] Complete. Length:', analysis.length, 'chars');
         
         setAiAnalysis(analysis);
