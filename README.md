@@ -5,6 +5,10 @@ Root workspace for the downtown Toronto traffic + building impact project.
 Primary app lives in:
 - `my-react-project/`
 
+## Tech Stack
+Frontend: React, MapLibre
+Backend: FastAPI
+
 ## Quick Start
 
 From repo root:
