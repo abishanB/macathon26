@@ -307,7 +307,10 @@ export function SimulationResultsPanel({
   }, [map, centerPoint, isVisible, isMinimized]);
 
   // AI Analysis of nearby buildings impact
+  // DISABLED: CORS issue - requires backend proxy
   useEffect(() => {
+    return; // Exit early - AI analysis disabled
+    
     if (!isVisible || isMinimized || nearbyBuildings.length === 0 || isAnalyzing) {
       return;
     }
@@ -599,7 +602,7 @@ Keep response concise, specific, and Toronto-focused. Use plain language for cit
           )}
 
           {/* AI-Powered Context Analysis */}
-          {nearbyBuildings.length > 0 && (
+          {false && nearbyBuildings.length > 0 && (
             <section style={{ marginBottom: "16px" }}>
               <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "8px", color: "#1f2937" }}>
                 🤖 AI Impact Analysis
