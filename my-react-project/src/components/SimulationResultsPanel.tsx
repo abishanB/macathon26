@@ -28,11 +28,13 @@ function getNearbyBuildingsAndPOIs(
   radiusPixels: number = 500
 ): NearbyPlace[] {
   const centerPixel = map.project(centerPoint);
+  const zoom = map.getZoom();
   
   console.log('[Nearby Buildings Query] ===== START =====');
   console.log('[Nearby Buildings Query] Center point (construction site):', centerPoint);
   console.log('[Nearby Buildings Query] Center pixel:', { x: centerPixel.x, y: centerPixel.y });
-  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels (very tight - immediate vicinity only)');
+  console.log('[Nearby Buildings Query] Map zoom level:', zoom);
+  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels');
   
   const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
     [centerPixel.x - radiusPixels, centerPixel.y - radiusPixels],
@@ -226,17 +228,29 @@ export function SimulationResultsPanel({
 }: SimulationResultsPanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
   const [nearbyBuildings, setNearbyBuildings] = useState<NearbyPlace[]>([]);
+  const [aiAnalysis, setAiAnalysis] = useState<string>('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // Query nearby buildings when panel opens or center changes
   useEffect(() => {
     if (!map || !centerPoint || !isVisible || isMinimized) {
+      console.log('[Nearby Buildings] Skipping query:', { 
+        hasMap: !!map, 
+        hasCenterPoint: !!centerPoint, 
+        isVisible, 
+        isMinimized 
+      });
       return;
     }
     
+    // Clear previous AI analysis when location changes
+    setAiAnalysis('');
+    
     async function fetchNearbyBuildingsWithAddresses() {
       try {
-        // Use very small radius (10 pixels) for immediate vicinity only
-        const buildings = getNearbyBuildingsAndPOIs(map!, centerPoint!, 10);
+        // Use 100 pixel radius for nearby buildings (roughly 100-200m depending on zoom)
+        console.log('[Nearby Buildings] Starting query at:', centerPoint, 'with 100px radius');
+        const buildings = getNearbyBuildingsAndPOIs(map!, centerPoint!, 100);
         
         // Geocode each building to get real address
         const token = import.meta.env.VITE_MAPBOX_TOKEN || import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
@@ -279,18 +293,121 @@ export function SimulationResultsPanel({
             })
           );
           
+          console.log('[Nearby Buildings] Final results with addresses:', withAddresses.length, 'buildings');
           setNearbyBuildings(withAddresses);
         } else {
+          console.log('[Nearby Buildings] Final results (no geocoding):', buildings.length, 'buildings');
           setNearbyBuildings(buildings);
         }
       } catch (error) {
-        console.error('Failed to query nearby buildings:', error);
+        console.error('[Nearby Buildings] Failed to query:', error);
         setNearbyBuildings([]);
       }
     }
     
     fetchNearbyBuildingsWithAddresses();
   }, [map, centerPoint, isVisible, isMinimized]);
+
+  // AI Analysis of nearby buildings impact
+  useEffect(() => {
+    // Don't run if already analyzing, not visible, or no nearby buildings
+    if (!isVisible || isMinimized || nearbyBuildings.length === 0 || isAnalyzing) {
+      return;
+    }
+
+    // Don't re-run if we already have an analysis (only run once per nearby buildings change)
+    if (aiAnalysis) {
+      return;
+    }
+
+    async function analyzeNearbyBuildingsImpact() {
+      setIsAnalyzing(true);
+      console.log('[AI Analysis] Starting analysis of nearby buildings...');
+      
+      try {
+
+        // Build context about nearby buildings
+        const buildingsList = nearbyBuildings.map((b, i) => 
+          `${i + 1}. ${b.name} (${b.type}) - ${b.address}`
+        ).join('\n');
+
+        const buildingTypes = nearbyBuildings.map(b => b.type);
+        const uniqueTypes = [...new Set(buildingTypes)];
+
+        const query = `Analyze the impact of a NEW CONSTRUCTION PROJECT given these nearby buildings:
+
+NEARBY BUILDINGS (within immediate vicinity, 2-10m radius):
+${buildingsList}
+
+BUILDING TYPES PRESENT: ${uniqueTypes.join(', ')}
+
+CONSTRUCTION DETAILS:
+- Buildings placed: ${buildingCount}
+- Road segments closed: ${closedRoads}
+- Traffic congestion: ${stats.closed > 0 ? 'Medium-High' : 'Low'}
+
+Provide a brief, actionable analysis (3-5 sentences max) covering:
+
+1. BUSINESS IMPACT: If multiple similar businesses (restaurants, stores, schools), discuss:
+   - Competition effects (2+ restaurants = increased competition)
+   - Market saturation concerns
+   - Customer base dilution
+
+2. FEASIBILITY CONCERNS: If unusual patterns detected:
+   - Multiple schools/institutions (class size, enrollment impact)
+   - Conflicting uses (industrial near residential)
+   - Over-concentration of single type
+
+3. COMMUNITY IMPACT: Consider:
+   - Access disruption to essential services (hospitals, schools)
+   - Parking shortage effects on nearby businesses
+   - Foot traffic changes during construction
+
+4. OPPORTUNITIES: Positive aspects:
+   - Complementary businesses (coffee shop + bookstore)
+   - Mixed-use development benefits
+   - Urban density improvements
+
+Keep response concise, specific, and Toronto-focused. Use plain language for city planners.`;
+
+        // Call backend proxy (avoids CORS issues)
+        // Backend automatically handles thread creation and caching
+        const response = await fetch('http://localhost:3001/api/ai/analyze', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            query,
+            options: {
+              llm_provider: 'openrouter',
+              model_name: 'openai/gpt-4o-mini',
+            }
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          console.error('[AI Analysis] API error:', error);
+          setAiAnalysis('');
+          return;
+        }
+
+        const result = await response.json();
+        const analysis = result.answer || result.content || result.message || '';
+        console.log('[AI Analysis] Complete. Length:', analysis.length, 'chars');
+        
+        setAiAnalysis(analysis);
+      } catch (error) {
+        console.error('[AI Analysis] Failed:', error);
+        setAiAnalysis('');
+      } finally {
+        setIsAnalyzing(false);
+      }
+    }
+
+    analyzeNearbyBuildingsImpact();
+  }, [nearbyBuildings, buildingCount, closedRoads, stats.closed, isVisible, isMinimized]);
 
   if (!isVisible) return null;
 
@@ -492,6 +609,73 @@ export function SimulationResultsPanel({
                   </div>
                 ))}
               </div>
+            </section>
+          )}
+
+          {/* AI-Powered Context Analysis */}
+          {nearbyBuildings.length > 0 && (
+            <section style={{ marginBottom: "16px" }}>
+              <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "8px", color: "#1f2937" }}>
+                🤖 AI Impact Analysis
+              </h3>
+              {isAnalyzing ? (
+                <div style={{ 
+                  padding: "12px", 
+                  background: "#f0f9ff", 
+                  borderRadius: "6px",
+                  border: "1px solid #bae6fd",
+                  fontSize: "12px",
+                  color: "#0369a1",
+                  textAlign: "center"
+                }}>
+                  <div style={{ marginBottom: "6px" }}>🔄 Analyzing nearby context...</div>
+                  <div style={{ fontSize: "10px", color: "#0c4a6e" }}>
+                    Evaluating business competition, feasibility, and community impact
+                  </div>
+                </div>
+              ) : aiAnalysis ? (
+                <div style={{ 
+                  padding: "10px", 
+                  background: "#fefce8", 
+                  borderRadius: "6px",
+                  border: "1px solid #fde047",
+                  fontSize: "11px",
+                  color: "#713f12",
+                  lineHeight: "1.6"
+                }}>
+                  <div style={{ 
+                    fontWeight: "600", 
+                    marginBottom: "6px", 
+                    color: "#854d0e",
+                    fontSize: "12px"
+                  }}>
+                    Contextual Insights:
+                  </div>
+                  <div style={{ whiteSpace: "pre-wrap" }}>
+                    {aiAnalysis}
+                  </div>
+                  <div style={{ 
+                    marginTop: "8px", 
+                    paddingTop: "8px", 
+                    borderTop: "1px solid #fde047",
+                    fontSize: "10px",
+                    color: "#a16207"
+                  }}>
+                    ⚡ Powered by Gemini 2.0 Flash · Based on local building context
+                  </div>
+                </div>
+              ) : (
+                <div style={{ 
+                  padding: "8px", 
+                  background: "#f3f4f6", 
+                  borderRadius: "6px",
+                  fontSize: "11px",
+                  color: "#6b7280",
+                  fontStyle: "italic"
+                }}>
+                  Enable AI analysis by setting VITE_BACKBOARD_API_KEY in .env
+                </div>
+              )}
             </section>
           )}
 

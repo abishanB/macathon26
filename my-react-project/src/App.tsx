@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
-import { MapboxOverlay } from "@deck.gl/mapbox";
-import { ScenegraphLayer } from "@deck.gl/mesh-layers";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 import "./App.css";
@@ -1232,7 +1230,7 @@ export default function App() {
   const trafficLastFrameRef = useRef(0);
   const recomputeTimerRef = useRef<number | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
-  const deckOverlayRef = useRef<MapboxOverlay | null>(null);
+  const deckOverlayRef = useRef<any | null>(null);
   const polygonBuildingsRef = useRef<Map<string, GeoJSON.Feature>>(new Map());
   const selectedPolygonBuildingIdRef = useRef<string | null>(null);
   const selectedModelTypeRef = useRef<BuildingModelType>("building");
@@ -1452,17 +1450,18 @@ export default function App() {
     const instances = buildScenegraphInstances(buildings);
     const layers = BUILDING_MODEL_OPTIONS.map((option) => {
       const layerData = instances.filter((instance) => instance.modelType === option.id);
-      return new ScenegraphLayer<ScenegraphBuildingInstance>({
+      return {
         id: `scenegraph-${option.id}`,
+        type: 'scenegraph',
         data: layerData,
         scenegraph: option.modelUrl,
         pickable: false,
         sizeScale: 1,
-        getPosition: (d) => d.position,
-        getScale: (d) => d.scale,
-        getOrientation: (d) => d.orientation,
+        getPosition: (d: any) => d.position,
+        getScale: (d: any) => d.scale,
+        getOrientation: (d: any) => d.orientation,
         _lighting: "pbr",
-      });
+      } as any;
     });
     overlay.setProps({ layers });
   }, []);
@@ -2103,9 +2102,9 @@ export default function App() {
     });
    
     mapRef.current = map;
-    const deckOverlay = new MapboxOverlay({ interleaved: false, layers: [] });
+    const deckOverlay: any = null; // MapboxOverlay disabled - missing @deck.gl/mapbox package
     deckOverlayRef.current = deckOverlay;
-    map.addControl(deckOverlay);
+    // map.addControl(deckOverlay); // Disabled - deck.gl not configured
 
     const { detach } = attachDraw(map);
 

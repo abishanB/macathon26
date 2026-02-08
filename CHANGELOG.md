@@ -1,6 +1,23 @@
 # Changelog
 
-## [Unreleased] - 2026-02-08
+## [Unreleased]
+
+### Added - February 8, 2026
+- **AI Context Analysis**: Gemini 2.0 Flash-powered analysis of construction impact based on nearby buildings
+  - Analyzes business competition (e.g., multiple restaurants, market saturation)
+  - Identifies feasibility concerns (e.g., multiple schools, conflicting uses)
+  - Evaluates community impact (essential service access, parking, foot traffic)
+  - Highlights opportunities (complementary businesses, mixed-use benefits)
+  - Displays in new "🤖 AI Impact Analysis" section below Nearby Buildings
+  - Uses Backboard.io + OpenRouter integration
+  - ~2 second response time, costs ~$0.025 per analysis
+  - See `docs/AI_CONTEXT_ANALYSIS_FEATURE.md` for full documentation
+
+### Fixed - February 8, 2026
+- Removed unused deck.gl imports causing TypeScript build errors
+- Fixed implicit 'any' type errors in App.tsx
+
+## [Previous Releases] - 2026-02-08
 
 ### Added - Nearby Buildings Feature
 
