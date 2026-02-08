@@ -90,16 +90,23 @@ const TRAFFIC_PARTICLE_LAYER_ID = "traffic-particles";
 const TRAFFIC_PARTICLE_MAX_COUNT = 1400;
 const TRAFFIC_ROUTE_POOL_MAX = 1600;
 const TRAFFIC_PARTICLE_FRAME_MS = 70;
-const TRAFFIC_PARTICLE_SPEED_SCALE = 2.35;
+const TRAFFIC_PARTICLE_SPEED_SCALE = 3.35;
 const TRAFFIC_FOLLOW_MIN_GAP_M = 4;
 const TRAFFIC_FOLLOW_TIME_HEADWAY_SEC = 0.42;
-const TRAFFIC_INTERSECTION_HEADWAY_SEC = 0.62;
+const TRAFFIC_INTERSECTION_HEADWAY_SEC = 0.28;
 const TRAFFIC_INTERSECTION_HOLD_BACK_M = 1.8;
 const TRAFFIC_INTERSECTION_SLOW_ZONE_M = 26;
 const TRAFFIC_INTERSECTION_SLOW_FACTOR = 0.24;
-const TRAFFIC_SIGNAL_BASE_CYCLE_SEC = 38;
-const TRAFFIC_SIGNAL_CYCLE_VARIANCE_SEC = 14;
-const TRAFFIC_SIGNAL_GREEN_RATIO = 0.52;
+const TRAFFIC_INTERSECTION_GREEN_SLOW_FACTOR = 0.72;
+const TRAFFIC_INTERSECTION_QUEUE_GAP_M = 11.5;
+const TRAFFIC_INTERSECTION_APPROACH_OFFSET_STEP_M = 0.65;
+const TRAFFIC_INTERSECTION_APPROACH_OFFSET_SLOTS = 6;
+const TRAFFIC_LANE_OFFSET_BASE_M = 1.45;
+const TRAFFIC_LANE_OFFSET_VARIATION_M = 0.35;
+const TRAFFIC_SPAWN_STAGGER_M = 7;
+const TRAFFIC_SIGNAL_BASE_CYCLE_SEC = 20;
+const TRAFFIC_SIGNAL_CYCLE_VARIANCE_SEC = 8;
+const TRAFFIC_SIGNAL_GREEN_RATIO = 0.6;
 const TRAFFIC_MAX_ACCEL_MPS2 = 8.5;
 const TRAFFIC_MAX_BRAKE_MPS2 = 13;
 const TRAFFIC_INTERSECTION_STOP_EPS_M = 0.06;
@@ -640,6 +647,14 @@ function edgeSpeedMps(edgeLengthM: number, edgeMetric: EdgeMetric | undefined): 
   return clampNumber(edgeLengthM / edgeMetric.time, 1.2, 30);
 }
 
+function laneOffsetMetersForEdge(edge: Graph["edges"][number]): number {
+  const directionalSign = edge.id.endsWith("_a") ? 1 : edge.id.endsWith("_b") ? -1 : 0;
+  const sideSign = directionalSign !== 0 ? directionalSign : (hashNodeId(edge.id) & 1) === 0 ? 1 : -1;
+  const variationBucket = hashNodeId(`${edge.id}:lane`) % 3;
+  const variation = variationBucket === 0 ? 0 : variationBucket === 1 ? TRAFFIC_LANE_OFFSET_VARIATION_M : -TRAFFIC_LANE_OFFSET_VARIATION_M;
+  return sideSign * (TRAFFIC_LANE_OFFSET_BASE_M + variation);
+}
+
 function interpolateAlongEdge(
   edge: Graph["edges"][number],
   progressM: number,
@@ -651,9 +666,26 @@ function interpolateAlongEdge(
   }
   const edgeLength = Math.max(1, edge.lengthM);
   const t = clampNumber(progressM / edgeLength, 0, 1);
+  const lng = start[0] + (end[0] - start[0]) * t;
+  const lat = start[1] + (end[1] - start[1]) * t;
+
+  const midLatRad = (((start[1] + end[1]) * 0.5) * Math.PI) / 180;
+  const vx = (end[0] - start[0]) * Math.cos(midLatRad);
+  const vy = end[1] - start[1];
+  const norm = Math.hypot(vx, vy);
+  if (norm <= 1e-9) {
+    return [lng, lat];
+  }
+
+  const perpX = -vy / norm;
+  const perpY = vx / norm;
+  const laneOffsetM = laneOffsetMetersForEdge(edge);
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = Math.max(1e-6, metersPerDegLat * Math.cos(midLatRad));
+
   return [
-    start[0] + (end[0] - start[0]) * t,
-    start[1] + (end[1] - start[1]) * t,
+    lng + (perpX * laneOffsetM) / metersPerDegLng,
+    lat + (perpY * laneOffsetM) / metersPerDegLat,
   ];
 }
 
@@ -764,7 +796,11 @@ function assignParticleRoute(
     return false;
   }
 
-  const edgeProgressM = spawnAtStart ? 0 : Math.random() * Math.max(1, edge.lengthM * 0.8);
+  const spawnStaggerRatio = (hashNodeId(`${particle.id}:${route.edgeIds[0]}`) % 1000) / 1000;
+  const spawnWindowM = Math.min(TRAFFIC_SPAWN_STAGGER_M, Math.max(0.75, edge.lengthM * 0.35));
+  const edgeProgressM = spawnAtStart
+    ? spawnStaggerRatio * spawnWindowM
+    : Math.random() * Math.max(1, edge.lengthM * 0.8);
   particle.route = route;
   particle.edgeIndex = edgeIndex;
   particle.edgeProgressM = edgeProgressM;
@@ -847,6 +883,39 @@ function isIntersectionSignalGreen(nodeId: string, incomingEdge: Edge, simTimeSe
   return movementAxis === primaryAxis ? primaryIsGreen : !primaryIsGreen;
 }
 
+function intersectionHoldBackForEdge(edge: Edge): number {
+  const slot = hashNodeId(edge.id) % Math.max(1, TRAFFIC_INTERSECTION_APPROACH_OFFSET_SLOTS);
+  return TRAFFIC_INTERSECTION_HOLD_BACK_M + slot * TRAFFIC_INTERSECTION_APPROACH_OFFSET_STEP_M;
+}
+
+const SIGNAL_NODE_CACHE = new WeakMap<Graph, Set<string>>();
+
+function signalControlledNodes(graph: Graph): Set<string> {
+  const cached = SIGNAL_NODE_CACHE.get(graph);
+  if (cached) {
+    return cached;
+  }
+
+  const neighbors = new Map<string, Set<string>>();
+  for (const nodeId of graph.nodes.keys()) {
+    neighbors.set(nodeId, new Set<string>());
+  }
+  for (const edge of graph.edges) {
+    neighbors.get(edge.from)?.add(edge.to);
+    neighbors.get(edge.to)?.add(edge.from);
+  }
+
+  const controlled = new Set<string>();
+  for (const [nodeId, nodeNeighbors] of neighbors) {
+    if (nodeNeighbors.size >= 3) {
+      controlled.add(nodeId);
+    }
+  }
+
+  SIGNAL_NODE_CACHE.set(graph, controlled);
+  return controlled;
+}
+
 function buildEdgeVehicleBuckets(particles: TrafficParticle[]): Map<string, TrafficParticle[]> {
   const buckets = new Map<string, TrafficParticle[]>();
   for (const particle of particles) {
@@ -869,6 +938,57 @@ function buildEdgeVehicleBuckets(particles: TrafficParticle[]): Map<string, Traf
   return buckets;
 }
 
+function enforceEdgeSpacing(
+  particles: TrafficParticle[],
+  graph: Graph,
+  controlledSignalNodes: ReadonlySet<string>,
+): void {
+  const buckets = buildEdgeVehicleBuckets(particles);
+  for (const edgeVehicles of buckets.values()) {
+    if (edgeVehicles.length <= 1) {
+      continue;
+    }
+
+    edgeVehicles.sort((a, b) => b.edgeProgressM - a.edgeProgressM);
+    let leader = edgeVehicles[0];
+    for (let idx = 1; idx < edgeVehicles.length; idx += 1) {
+      const follower = edgeVehicles[idx];
+      const leaderEdgeId = leader.route.edgeIds[leader.edgeIndex];
+      const followerEdgeId = follower.route.edgeIds[follower.edgeIndex];
+      if (!leaderEdgeId || !followerEdgeId || leaderEdgeId !== followerEdgeId) {
+        leader = follower;
+        continue;
+      }
+
+      const followerEdge = graph.edgesById.get(followerEdgeId);
+      if (!followerEdge) {
+        leader = follower;
+        continue;
+      }
+      const edgeLength = Math.max(1, followerEdge.lengthM);
+      const baseGapM = TRAFFIC_FOLLOW_MIN_GAP_M * follower.headwayFactor;
+      let minGapM = baseGapM;
+      if (controlledSignalNodes.has(followerEdge.to)) {
+        const stopLineProgress = Math.max(0, edgeLength - intersectionHoldBackForEdge(followerEdge));
+        const nearStopLineThreshold = stopLineProgress - TRAFFIC_INTERSECTION_SLOW_ZONE_M;
+        const leaderNearStop = leader.edgeProgressM >= nearStopLineThreshold;
+        const followerNearStop = follower.edgeProgressM >= nearStopLineThreshold;
+        if (leaderNearStop || followerNearStop) {
+          minGapM = Math.max(minGapM, TRAFFIC_INTERSECTION_QUEUE_GAP_M * follower.headwayFactor);
+        }
+      }
+      const maxProgress = Math.max(0, leader.edgeProgressM - minGapM);
+      if (follower.edgeProgressM > maxProgress) {
+        follower.edgeProgressM = maxProgress;
+        follower.currentSpeedMps = Math.min(follower.currentSpeedMps, leader.currentSpeedMps);
+      }
+      follower.edgeProgressM = clampNumber(follower.edgeProgressM, 0, edgeLength);
+      follower.position = interpolateAlongEdge(followerEdge, follower.edgeProgressM);
+      leader = follower;
+    }
+  }
+}
+
 function advanceTrafficParticles(
   particles: TrafficParticle[],
   graph: Graph,
@@ -884,6 +1004,7 @@ function advanceTrafficParticles(
 
   const dt = Math.max(0.02, Math.min(0.25, deltaSeconds));
   const edgeBuckets = buildEdgeVehicleBuckets(particles);
+  const controlledSignalNodes = signalControlledNodes(graph);
 
   for (const edgeVehicles of edgeBuckets.values()) {
     let leaderProgressOnEdge = Number.POSITIVE_INFINITY;
@@ -908,10 +1029,16 @@ function advanceTrafficParticles(
       }
 
       const edgeLength = Math.max(1, edge.lengthM);
-      const stopLineProgress = Math.max(0, edgeLength - TRAFFIC_INTERSECTION_HOLD_BACK_M);
+      const nodeIsSignalized = controlledSignalNodes.has(edge.to);
+      const stopLineProgress = nodeIsSignalized
+        ? Math.max(0, edgeLength - intersectionHoldBackForEdge(edge))
+        : edgeLength;
       const distanceToStop = stopLineProgress - particle.edgeProgressM;
       const baseSpeedMps =
         edgeSpeedMps(edge.lengthM, metric) * TRAFFIC_PARTICLE_SPEED_SCALE * particle.speedFactor;
+      const nextOpenTime = nodeNextRelease.get(edge.to) ?? 0;
+      const movementGreen = isIntersectionSignalGreen(edge.to, edge, simTimeSec);
+      const intersectionBlocked = nodeIsSignalized && (!movementGreen || simTimeSec < nextOpenTime);
 
       const minGapM = TRAFFIC_FOLLOW_MIN_GAP_M * particle.headwayFactor;
       const desiredGapM =
@@ -931,18 +1058,18 @@ function advanceTrafficParticles(
 
       if (distanceToStop <= TRAFFIC_INTERSECTION_SLOW_ZONE_M) {
         const approachRatio = clampNumber(distanceToStop / TRAFFIC_INTERSECTION_SLOW_ZONE_M, 0, 1);
+        const intersectionSlowFactor = intersectionBlocked
+          ? TRAFFIC_INTERSECTION_SLOW_FACTOR
+          : TRAFFIC_INTERSECTION_GREEN_SLOW_FACTOR;
         const slowdown =
-          TRAFFIC_INTERSECTION_SLOW_FACTOR +
-          (1 - TRAFFIC_INTERSECTION_SLOW_FACTOR) * approachRatio;
+          intersectionSlowFactor + (1 - intersectionSlowFactor) * approachRatio;
         targetSpeedMps = Math.min(
           targetSpeedMps,
-          baseSpeedMps * clampNumber(slowdown, TRAFFIC_INTERSECTION_SLOW_FACTOR, 1),
+          baseSpeedMps * clampNumber(slowdown, intersectionSlowFactor, 1),
         );
       }
 
-      const nextOpenTime = nodeNextRelease.get(edge.to) ?? 0;
-      const movementGreen = isIntersectionSignalGreen(edge.to, edge, simTimeSec);
-      if (!movementGreen || simTimeSec < nextOpenTime) {
+      if (intersectionBlocked) {
         const stoppingSpeedLimit = Math.max(0, distanceToStop) / dt;
         targetSpeedMps = Math.min(targetSpeedMps, stoppingSpeedLimit);
       }
@@ -974,8 +1101,9 @@ function advanceTrafficParticles(
         const nodeId = activeEdge.to;
         const activeNextOpenTime = nodeNextRelease.get(nodeId) ?? 0;
         const signalGreen = isIntersectionSignalGreen(nodeId, activeEdge, simTimeSec);
-        if (simTimeSec < activeNextOpenTime || !signalGreen) {
-          const holdAt = Math.max(0, activeEdgeLength - TRAFFIC_INTERSECTION_HOLD_BACK_M);
+        const nodeIsSignalized = controlledSignalNodes.has(nodeId);
+        if (nodeIsSignalized && (simTimeSec < activeNextOpenTime || !signalGreen)) {
+          const holdAt = Math.max(0, activeEdgeLength - intersectionHoldBackForEdge(activeEdge));
           candidateProgress = Math.min(candidateProgress, holdAt);
           if (candidateProgress >= holdAt - TRAFFIC_INTERSECTION_STOP_EPS_M) {
             particle.currentSpeedMps = Math.min(particle.currentSpeedMps, 0.8);
@@ -983,7 +1111,9 @@ function advanceTrafficParticles(
           break;
         }
 
-        nodeNextRelease.set(nodeId, simTimeSec + TRAFFIC_INTERSECTION_HEADWAY_SEC);
+        if (nodeIsSignalized) {
+          nodeNextRelease.set(nodeId, simTimeSec + TRAFFIC_INTERSECTION_HEADWAY_SEC);
+        }
         candidateProgress -= activeEdgeLength;
         particle.edgeIndex += 1;
         hop += 1;
@@ -1034,10 +1164,15 @@ function advanceTrafficParticles(
       const finalEdgeLength = Math.max(1, edge.lengthM);
       let clampedProgress = clampNumber(candidateProgress, 0, finalEdgeLength);
       if (edgeId === startingEdgeId) {
-        const localStopLine = Math.max(0, finalEdgeLength - TRAFFIC_INTERSECTION_HOLD_BACK_M);
+        const localStopLine = Math.max(0, finalEdgeLength - intersectionHoldBackForEdge(edge));
         const localNextOpenTime = nodeNextRelease.get(edge.to) ?? 0;
         const localGreen = isIntersectionSignalGreen(edge.to, edge, simTimeSec);
-        if ((!localGreen || simTimeSec < localNextOpenTime) && clampedProgress > localStopLine) {
+        const nodeIsSignalized = controlledSignalNodes.has(edge.to);
+        if (
+          nodeIsSignalized &&
+          (!localGreen || simTimeSec < localNextOpenTime) &&
+          clampedProgress > localStopLine
+        ) {
           clampedProgress = localStopLine;
           particle.currentSpeedMps = Math.min(particle.currentSpeedMps, 0.8);
         }
@@ -1051,6 +1186,8 @@ function advanceTrafficParticles(
       }
     }
   }
+
+  enforceEdgeSpacing(particles, graph, controlledSignalNodes);
 }
 
 function trafficParticlesToFeatures(
