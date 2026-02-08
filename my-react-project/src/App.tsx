@@ -471,7 +471,6 @@ export default function App() {
       maxBounds: TORONTO_BOUNDS,
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
-      antialias: true,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     mapRef.current = map;
