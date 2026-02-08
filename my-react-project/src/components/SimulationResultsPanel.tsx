@@ -32,7 +32,7 @@ function getNearbyBuildingsAndPOIs(
   console.log('[Nearby Buildings Query] ===== START =====');
   console.log('[Nearby Buildings Query] Center point (construction site):', centerPoint);
   console.log('[Nearby Buildings Query] Center pixel:', { x: centerPixel.x, y: centerPixel.y });
-  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels');
+  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels (very tight - immediate vicinity only)');
   
   const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
     [centerPixel.x - radiusPixels, centerPixel.y - radiusPixels],
@@ -233,13 +233,63 @@ export function SimulationResultsPanel({
       return;
     }
     
-    try {
-      const buildings = getNearbyBuildingsAndPOIs(map, centerPoint, 500);
-      setNearbyBuildings(buildings);
-    } catch (error) {
-      console.error('Failed to query nearby buildings:', error);
-      setNearbyBuildings([]);
+    async function fetchNearbyBuildingsWithAddresses() {
+      try {
+        // Use very small radius (10 pixels) for immediate vicinity only
+        const buildings = getNearbyBuildingsAndPOIs(map!, centerPoint!, 10);
+        
+        // Geocode each building to get real address
+        const token = import.meta.env.VITE_MAPBOX_TOKEN || import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+        
+        if (token && buildings.length > 0) {
+          console.log('[Nearby Buildings] Geocoding addresses...');
+          const withAddresses = await Promise.all(
+            buildings.map(async (building) => {
+              // If already has a street address, keep it
+              if (!building.address.includes('°N')) {
+                return building;
+              }
+              
+              // Extract coordinates from address
+              const coords = building.address.match(/([\d.]+)°N, ([\d.]+)°W/);
+              if (!coords) return building;
+              
+              const lat = parseFloat(coords[1]);
+              const lng = -parseFloat(coords[2]);
+              
+              try {
+                const response = await fetch(
+                  `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?` +
+                  `access_token=${token}&types=address,poi&limit=1`
+                );
+                const data = await response.json();
+                
+                if (data.features && data.features.length > 0) {
+                  const feature = data.features[0];
+                  return {
+                    ...building,
+                    address: feature.place_name || building.address
+                  };
+                }
+              } catch (err) {
+                console.warn('[Nearby Buildings] Geocoding failed for:', building.name, err);
+              }
+              
+              return building;
+            })
+          );
+          
+          setNearbyBuildings(withAddresses);
+        } else {
+          setNearbyBuildings(buildings);
+        }
+      } catch (error) {
+        console.error('Failed to query nearby buildings:', error);
+        setNearbyBuildings([]);
+      }
     }
+    
+    fetchNearbyBuildingsWithAddresses();
   }, [map, centerPoint, isVisible, isMinimized]);
 
   if (!isVisible) return null;
