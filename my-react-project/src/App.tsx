@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
+import { MapboxOverlay } from "@deck.gl/mapbox";
+import { ScenegraphLayer } from "@deck.gl/mesh-layers";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 import "./App.css";
@@ -49,6 +51,27 @@ type FeatureLike = {
   geometry?: GeoJSON.Geometry;
 };
 
+type BuildingModelType = "building" | "large-building" | "schoolhouse" | "construction-sign";
+type SliderDrivesDimension = "height" | "width" | "thickness";
+type BuildingModelOption = {
+  id: BuildingModelType;
+  label: string;
+  modelUrl: string;
+  referenceWidthM: number;
+  referenceDepthM: number;
+  referenceHeightM: number;
+  supersizeMultiplier: number;
+  orientation: [number, number, number];
+  sliderDrives: SliderDrivesDimension;
+};
+type ScenegraphBuildingInstance = {
+  id: string;
+  modelType: BuildingModelType;
+  position: [number, number, number];
+  scale: [number, number, number];
+  orientation: [number, number, number];
+};
+
 const INITIAL_CENTER: [number, number] = [-79.385, 45];
 const INITIAL_ZOOM = 12;
 const PITCH = 45;
@@ -73,6 +96,52 @@ const POLYGON_BUILDINGS_OUTLINE_LAYER_ID = "polygon-buildings-outline";
 const RECTANGLE_PREVIEW_SOURCE_ID = "rectangle-preview";
 const RECTANGLE_PREVIEW_FILL_LAYER_ID = "rectangle-preview-fill";
 const RECTANGLE_PREVIEW_LINE_LAYER_ID = "rectangle-preview-line";
+// Central model tuning table: scale calibration, rotation, and slider behavior per model.
+const DEFAULT_MODEL_RENDER_PARAMS = {
+  supersizeMultiplier: 20,
+  orientation: [0, 0, 0] as [number, number, number],
+  sliderDrives: "height" as SliderDrivesDimension,
+};
+const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
+  {
+    id: "building",
+    label: "Building",
+    modelUrl: new URL("../3d_models/Building.glb", import.meta.url).href,
+    referenceWidthM: 20,
+    referenceDepthM: 20,
+    referenceHeightM: 20,
+    ...DEFAULT_MODEL_RENDER_PARAMS,
+  },
+  {
+    id: "large-building",
+    label: "Large Building",
+    modelUrl: new URL("../3d_models/Large Building.glb", import.meta.url).href,
+    referenceWidthM: 24,
+    referenceDepthM: 24,
+    referenceHeightM: 24,
+    supersizeMultiplier: 10,
+    orientation: [0, 0, 90],
+    sliderDrives: "thickness",
+  },
+  {
+    id: "schoolhouse",
+    label: "Schoolhouse",
+    modelUrl: new URL("../3d_models/Schoolhouse.glb", import.meta.url).href,
+    referenceWidthM: 16,
+    referenceDepthM: 16,
+    referenceHeightM: 16,
+    ...DEFAULT_MODEL_RENDER_PARAMS,
+  },
+  {
+    id: "construction-sign",
+    label: "Construction Sign",
+    modelUrl: new URL("../3d_models/Construction sign.glb", import.meta.url).href,
+    referenceWidthM: 3,
+    referenceDepthM: 3,
+    referenceHeightM: 3,
+    ...DEFAULT_MODEL_RENDER_PARAMS,
+  },
+];
 
 const DEFAULT_STATS: SimulationStats = {
   nodes: 0,
@@ -261,6 +330,122 @@ function extractBuildingId(
   return null;
 }
 
+function asBuildingModelType(value: unknown): BuildingModelType | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  return BUILDING_MODEL_OPTIONS.some((option) => option.id === value)
+    ? (value as BuildingModelType)
+    : null;
+}
+
+function getBuildingModelOption(modelType: BuildingModelType): BuildingModelOption {
+  const option = BUILDING_MODEL_OPTIONS.find((item) => item.id === modelType);
+  return option ?? BUILDING_MODEL_OPTIONS[0];
+}
+
+function polygonFeatureCenter(feature: GeoJSON.Feature): [number, number] | null {
+  if (!feature.geometry || feature.geometry.type !== "Polygon") {
+    return null;
+  }
+  const ring = feature.geometry.coordinates[0];
+  if (!ring || ring.length < 4) {
+    return null;
+  }
+  const uniquePoints = ring.length > 1 ? ring.slice(0, ring.length - 1) : ring;
+  if (uniquePoints.length === 0) {
+    return null;
+  }
+
+  let lngSum = 0;
+  let latSum = 0;
+  for (const [lng, lat] of uniquePoints) {
+    lngSum += lng;
+    latSum += lat;
+  }
+  return [lngSum / uniquePoints.length, latSum / uniquePoints.length];
+}
+
+function polygonFootprintDimensionsMeters(
+  feature: GeoJSON.Feature,
+): { widthM: number; depthM: number } | null {
+  if (!feature.geometry || feature.geometry.type !== "Polygon") {
+    return null;
+  }
+  const ring = feature.geometry.coordinates[0];
+  if (!ring || ring.length < 4) {
+    return null;
+  }
+
+  let minLng = Number.POSITIVE_INFINITY;
+  let maxLng = Number.NEGATIVE_INFINITY;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+  for (const [lng, lat] of ring) {
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+  }
+  const centerLat = (minLat + maxLat) / 2;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = Math.max(1, Math.cos((centerLat * Math.PI) / 180) * 111320);
+  const widthM = Math.max(1, (maxLng - minLng) * metersPerDegLng);
+  const depthM = Math.max(1, (maxLat - minLat) * metersPerDegLat);
+  return { widthM, depthM };
+}
+
+function scaleFromDimensions(
+  modelType: BuildingModelType,
+  widthM: number,
+  depthM: number,
+  heightM: number,
+): [number, number, number] {
+  const option = getBuildingModelOption(modelType);
+  const multiplier = option.supersizeMultiplier;
+  return [
+    clampNumber((widthM / option.referenceWidthM) * multiplier, 0.25, 300),
+    clampNumber((depthM / option.referenceDepthM) * multiplier, 0.25, 300),
+    clampNumber((heightM / option.referenceHeightM) * multiplier, 0.25, 300),
+  ];
+}
+
+function buildScenegraphInstances(
+  buildings: ReadonlyMap<string, GeoJSON.Feature>,
+): ScenegraphBuildingInstance[] {
+  const instances: ScenegraphBuildingInstance[] = [];
+  for (const [id, feature] of buildings.entries()) {
+    const center = polygonFeatureCenter(feature);
+    if (!center) {
+      continue;
+    }
+    const properties = asPropertiesRecord(feature.properties);
+    const modelType = asBuildingModelType(properties.modelType) ?? "building";
+    const option = getBuildingModelOption(modelType);
+    const heightValue = Math.max(1, Number.parseFloat(String(properties.height ?? 20)) || 20);
+    const dims = polygonFootprintDimensionsMeters(feature);
+    const widthM = dims?.widthM ?? 20;
+    const depthM = dims?.depthM ?? 20;
+    let scaledWidthM = widthM;
+    let scaledDepthM = depthM;
+    let scaledHeightM = heightValue;
+    if (option.sliderDrives === "width") {
+      scaledWidthM = heightValue;
+      scaledHeightM = widthM;
+    } else if (option.sliderDrives === "thickness") {
+      scaledHeightM = heightValue;
+    }
+    instances.push({
+      id,
+      modelType,
+      position: [center[0], center[1], 0],
+      scale: scaleFromDimensions(modelType, scaledWidthM, scaledDepthM, scaledHeightM),
+      orientation: option.orientation,
+    });
+  }
+  return instances;
+}
+
 function rectangleCoordinates(
   start: [number, number],
   end: [number, number],
@@ -285,6 +470,7 @@ function createRectangleFeature(
   start: [number, number],
   end: [number, number],
   height: number,
+  modelType: BuildingModelType,
   selected = false,
 ): GeoJSON.Feature<GeoJSON.Polygon> {
   return {
@@ -299,6 +485,7 @@ function createRectangleFeature(
       height,
       type: "rectangle-building",
       baseHeight: 0,
+      modelType,
       selected,
     },
   };
@@ -605,8 +792,10 @@ export default function App() {
   const trafficLastFrameRef = useRef(0);
   const recomputeTimerRef = useRef<number | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
+  const deckOverlayRef = useRef<MapboxOverlay | null>(null);
   const polygonBuildingsRef = useRef<Map<string, GeoJSON.Feature>>(new Map());
   const selectedPolygonBuildingIdRef = useRef<string | null>(null);
+  const selectedModelTypeRef = useRef<BuildingModelType>("building");
   const buildingModeRef = useRef(false);
   const drawModeRef = useRef(false);
   const rectHeightRef = useRef("40");
@@ -626,6 +815,7 @@ export default function App() {
   const [stats, setStats] = useState<SimulationStats>(DEFAULT_STATS);
 
   const [selectedPolygonBuildingId, setSelectedPolygonBuildingId] = useState<string | null>(null);
+  const [selectedModelType, setSelectedModelType] = useState<BuildingModelType>("building");
   const [buildingMode, setBuildingMode] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
   const [showResultsPanel, setShowResultsPanel] = useState(false);
@@ -674,6 +864,10 @@ export default function App() {
   useEffect(() => {
     selectedPolygonBuildingIdRef.current = selectedPolygonBuildingId;
   }, [selectedPolygonBuildingId]);
+
+  useEffect(() => {
+    selectedModelTypeRef.current = selectedModelType;
+  }, [selectedModelType]);
 
   useEffect(() => {
     rectFirstCornerRef.current = rectFirstCorner;
@@ -756,7 +950,7 @@ export default function App() {
           ],
           "fill-extrusion-height": ["get", "height"],
           "fill-extrusion-base": ["get", "baseHeight"],
-          "fill-extrusion-opacity": 0.8,
+          "fill-extrusion-opacity": 0.08,
         },
       });
     }
@@ -791,6 +985,29 @@ export default function App() {
     },
     [ensurePolygonBuildingsLayer],
   );
+
+  const updateScenegraphOverlay = useCallback((buildings: Map<string, GeoJSON.Feature>) => {
+    const overlay = deckOverlayRef.current;
+    if (!overlay) {
+      return;
+    }
+    const instances = buildScenegraphInstances(buildings);
+    const layers = BUILDING_MODEL_OPTIONS.map((option) => {
+      const layerData = instances.filter((instance) => instance.modelType === option.id);
+      return new ScenegraphLayer<ScenegraphBuildingInstance>({
+        id: `scenegraph-${option.id}`,
+        data: layerData,
+        scenegraph: option.modelUrl,
+        pickable: false,
+        sizeScale: 1,
+        getPosition: (d) => d.position,
+        getScale: (d) => d.scale,
+        getOrientation: (d) => d.orientation,
+        _lighting: "pbr",
+      });
+    });
+    overlay.setProps({ layers });
+  }, []);
 
   const ensureRectanglePreviewLayer = useCallback((map: maplibregl.Map) => {
     if (!map.getSource(RECTANGLE_PREVIEW_SOURCE_ID)) {
@@ -838,7 +1055,16 @@ export default function App() {
       }
       source.setData({
         type: "FeatureCollection",
-        features: [createRectangleFeature("rectangle-preview", start, end, height, false)],
+        features: [
+          createRectangleFeature(
+            "rectangle-preview",
+            start,
+            end,
+            height,
+            selectedModelTypeRef.current,
+            false,
+          ),
+        ],
       });
     },
     [ensureRectanglePreviewLayer],
@@ -978,6 +1204,7 @@ export default function App() {
   const setPolygonBuildingSelection = useCallback(
     (map: maplibregl.Map, nextSelectedId: string | null) => {
       let selectedHeight: number | null = null;
+      let selectedModel: BuildingModelType | null = null;
       let resolvedSelectedId: string | null = nextSelectedId;
       setPolygonBuildings((prev) => {
         if (nextSelectedId && !prev.has(nextSelectedId)) {
@@ -992,6 +1219,7 @@ export default function App() {
             if (Number.isFinite(heightValue)) {
               selectedHeight = heightValue;
             }
+            selectedModel = asBuildingModelType(properties.modelType) ?? "building";
           }
           next.set(id, {
             ...feature,
@@ -1003,19 +1231,29 @@ export default function App() {
         }
         polygonBuildingsRef.current = next;
         updatePolygonBuildingsSource(map, next);
+        updateScenegraphOverlay(next);
         return next;
       });
       setSelectedPolygonBuildingId(resolvedSelectedId);
       if (selectedHeight !== null) {
         setRectHeight(String(selectedHeight));
       }
+      if (selectedModel) {
+        setSelectedModelType(selectedModel);
+      }
       if (resolvedSelectedId) {
-        console.log("[BUILDING SELECT] Selected building", { id: resolvedSelectedId });
+        const selectedModelOption = getBuildingModelOption(selectedModel ?? "building");
+        console.log("[BUILDING SELECT] Selected building", {
+          id: resolvedSelectedId,
+          modelType: selectedModelOption.id,
+          modelLabel: selectedModelOption.label,
+          modelUrl: selectedModelOption.modelUrl,
+        });
       } else {
         console.log("[BUILDING SELECT] Cleared building selection");
       }
     },
-    [updatePolygonBuildingsSource],
+    [updatePolygonBuildingsSource, updateScenegraphOverlay],
   );
 
   const addPolygonBuilding = useCallback(
@@ -1023,6 +1261,7 @@ export default function App() {
       const buildingId = extractBuildingId(feature) ?? `rect-${Date.now()}`;
       const rawProperties = asPropertiesRecord(feature.properties);
       const heightValue = Math.max(1, Number.parseFloat(String(rawProperties.height ?? rectHeightRef.current)) || 20);
+      const modelType = asBuildingModelType(rawProperties.modelType) ?? selectedModelTypeRef.current;
 
       setPolygonBuildings((prev) => {
         const next = new Map<string, GeoJSON.Feature>();
@@ -1046,20 +1285,30 @@ export default function App() {
             height: heightValue,
             type: rawProperties.type ?? "rectangle-building",
             baseHeight: rawProperties.baseHeight ?? 0,
+            modelType,
             selected: true,
           },
         });
 
         polygonBuildingsRef.current = next;
         updatePolygonBuildingsSource(map, next);
+        updateScenegraphOverlay(next);
         return next;
       });
 
       setSelectedPolygonBuildingId(buildingId);
       setRectHeight(String(heightValue));
-      console.log("[BUILDING ADD] Added building", { id: buildingId, height: heightValue });
+      setSelectedModelType(modelType);
+      const modelOption = getBuildingModelOption(modelType);
+      console.log("[BUILDING ADD] Added building", {
+        id: buildingId,
+        height: heightValue,
+        modelType: modelOption.id,
+        modelLabel: modelOption.label,
+        modelUrl: modelOption.modelUrl,
+      });
     },
-    [updatePolygonBuildingsSource],
+    [updatePolygonBuildingsSource, updateScenegraphOverlay],
   );
 
   const collectBuildingRings = useCallback((): Array<[number, number][]> => {
@@ -1336,6 +1585,9 @@ export default function App() {
     });
    
     mapRef.current = map;
+    const deckOverlay = new MapboxOverlay({ interleaved: false, layers: [] });
+    deckOverlayRef.current = deckOverlay;
+    map.addControl(deckOverlay);
 
     const { detach } = attachDraw(map);
 
@@ -1366,6 +1618,7 @@ export default function App() {
       ensurePolygonBuildingsLayer(map);
       ensureRectanglePreviewLayer(map);
       updatePolygonBuildingsSource(map, polygonBuildingsRef.current);
+      updateScenegraphOverlay(polygonBuildingsRef.current);
       ensureTrafficParticleLayer(map);
       bringTrafficParticlesToFront(map);
 
@@ -1479,6 +1732,7 @@ export default function App() {
           });
           polygonBuildingsRef.current = next;
           updatePolygonBuildingsSource(map, next);
+          updateScenegraphOverlay(next);
           return next;
         });
         const selectedId = selectedPolygonBuildingIdRef.current;
@@ -1537,22 +1791,31 @@ export default function App() {
 
       const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
       const buildingId = `rect-${Date.now()}`;
-      const buildingFeature = createRectangleFeature(buildingId, dragStart, dragEnd, heightValue, true);
+      const buildingFeature = createRectangleFeature(
+        buildingId,
+        dragStart,
+        dragEnd,
+        heightValue,
+        selectedModelTypeRef.current,
+        true,
+      );
       addPolygonBuilding(map, buildingFeature);
       scheduleSimulation(0);
       setStatusText(`Building created (height ${heightValue}m).`);
     };
 
     const handleMapClick = (event: maplibregl.MapMouseEvent) => {
-      const buildingFeatures = map.queryRenderedFeatures(event.point, {
-        layers: [POLYGON_BUILDINGS_LAYER_ID],
-      });
-      if (buildingFeatures.length > 0) {
-        const buildingId = extractBuildingId(buildingFeatures[0]);
-        if (buildingId) {
-          setPolygonBuildingSelection(map, buildingId);
+      if (map.getLayer(POLYGON_BUILDINGS_LAYER_ID)) {
+        const buildingFeatures = map.queryRenderedFeatures(event.point, {
+          layers: [POLYGON_BUILDINGS_LAYER_ID],
+        });
+        if (buildingFeatures.length > 0) {
+          const buildingId = extractBuildingId(buildingFeatures[0]);
+          if (buildingId) {
+            setPolygonBuildingSelection(map, buildingId);
+          }
+          return;
         }
-        return;
       }
 
       if (buildingModeRef.current || drawModeRef.current) {
@@ -1630,12 +1893,14 @@ export default function App() {
         return;
       }
 
-      const buildingFeatures = map.queryRenderedFeatures(event.point, {
-        layers: [POLYGON_BUILDINGS_LAYER_ID],
-      });
-      if (buildingFeatures.length > 0) {
-        map.getCanvas().style.cursor = "pointer";
-        return;
+      if (map.getLayer(POLYGON_BUILDINGS_LAYER_ID)) {
+        const buildingFeatures = map.queryRenderedFeatures(event.point, {
+          layers: [POLYGON_BUILDINGS_LAYER_ID],
+        });
+        if (buildingFeatures.length > 0) {
+          map.getCanvas().style.cursor = "pointer";
+          return;
+        }
       }
 
       if (!map.getLayer(ROAD_LAYER_IDS.heat)) {
@@ -1688,6 +1953,10 @@ export default function App() {
       map.off("click", handleMapClick);
       map.off("mousemove", handleMouseMove);
       map.off("mouseleave", handleMouseLeave);
+      if (deckOverlayRef.current) {
+        map.removeControl(deckOverlayRef.current);
+        deckOverlayRef.current = null;
+      }
       map.getCanvas().style.cursor = "";
       map.remove();
       mapRef.current = null;
@@ -1707,6 +1976,7 @@ export default function App() {
     stopTrafficParticleAnimation,
     updateRectanglePreview,
     updatePolygonBuildingsSource,
+    updateScenegraphOverlay,
   ]);
 
   const handleResetClosures = useCallback(() => {
@@ -1758,6 +2028,7 @@ export default function App() {
       next.delete(selectedId);
       polygonBuildingsRef.current = next;
       updatePolygonBuildingsSource(map, next);
+      updateScenegraphOverlay(next);
       return next;
     });
 
@@ -1766,7 +2037,7 @@ export default function App() {
     console.log("[BUILDING DELETE] Deleted selected building", { id: selectedId });
     scheduleSimulation(0);
     setStatusText("Selected building deleted.");
-  }, [scheduleSimulation, updatePolygonBuildingsSource]);
+  }, [scheduleSimulation, updatePolygonBuildingsSource, updateScenegraphOverlay]);
 
   const handleRectHeightChange = useCallback(
     (value: string) => {
@@ -1804,6 +2075,7 @@ export default function App() {
         });
         polygonBuildingsRef.current = next;
         updatePolygonBuildingsSource(map, next);
+        updateScenegraphOverlay(next);
         return next;
       });
 
@@ -1813,7 +2085,53 @@ export default function App() {
       });
       scheduleSimulation(120);
     },
-    [scheduleSimulation, updatePolygonBuildingsSource, updateRectanglePreview],
+    [scheduleSimulation, updatePolygonBuildingsSource, updateRectanglePreview, updateScenegraphOverlay],
+  );
+
+  const handleModelTypeChange = useCallback(
+    (modelType: BuildingModelType) => {
+      setSelectedModelType(modelType);
+      const modelOption = getBuildingModelOption(modelType);
+      console.log("[MODEL SELECT] Model type changed", {
+        modelType: modelOption.id,
+        modelLabel: modelOption.label,
+        modelUrl: modelOption.modelUrl,
+      });
+      const map = mapRef.current;
+      const selectedId = selectedPolygonBuildingIdRef.current;
+      if (!map || !selectedId) {
+        return;
+      }
+
+      setPolygonBuildings((prev) => {
+        const selectedFeature = prev.get(selectedId);
+        if (!selectedFeature) {
+          return prev;
+        }
+        const next = new Map(prev);
+        const properties = asPropertiesRecord(selectedFeature.properties);
+        next.set(selectedId, {
+          ...selectedFeature,
+          properties: {
+            ...properties,
+            modelType,
+            selected: true,
+          },
+        });
+        polygonBuildingsRef.current = next;
+        updatePolygonBuildingsSource(map, next);
+        updateScenegraphOverlay(next);
+        return next;
+      });
+
+      console.log("[BUILDING UPDATE] Updated selected building model", {
+        id: selectedId,
+        modelType: modelOption.id,
+        modelLabel: modelOption.label,
+        modelUrl: modelOption.modelUrl,
+      });
+    },
+    [updatePolygonBuildingsSource, updateScenegraphOverlay],
   );
 
   useEffect(() => {
@@ -1902,6 +2220,20 @@ export default function App() {
       <section className="shape-panel">
         <h2>Add Building</h2>
         <div className="shape-row">
+          <label htmlFor="building-model">3D Model</label>
+          <select
+            id="building-model"
+            value={selectedModelType}
+            onChange={(e) => handleModelTypeChange(e.target.value as BuildingModelType)}
+          >
+            {BUILDING_MODEL_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="shape-row">
           <label htmlFor="shape-height">
             Height: {Math.max(1, Number.parseFloat(rectHeight) || 20).toFixed(0)} m
           </label>
@@ -1917,8 +2249,8 @@ export default function App() {
         </div>
         <p className="shape-help">
           {selectedPolygonBuildingId
-            ? `Selected: ${selectedPolygonBuildingId}`
-            : "No building selected. Click one to select it."}
+            ? `Selected: ${selectedPolygonBuildingId} (${getBuildingModelOption(selectedModelType).label})`
+            : `Next model: ${getBuildingModelOption(selectedModelType).label}. Click one building to edit.`}
         </p>
         <button
           type="button"
