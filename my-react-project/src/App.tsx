@@ -8,6 +8,11 @@ import { DrawPolygonControl } from "./map/DrawPolygonControl";
 import { addRoadLayers, ROAD_LAYER_IDS, updateRoadSourceData } from "./map/layers";
 import { buildGraphFromGeoJSON } from "./traffic/graph";
 import {
+  buildReverseAdjacency,
+  dijkstraTreeToDestination,
+  reconstructPathFromTree,
+} from "./traffic/dijkstra";
+import {
   assignTraffic,
   countDisconnectedTrips,
   generateOD,
@@ -15,7 +20,12 @@ import {
   generateReachabilityProbe,
   getClosedFeatureNodeIds,
 } from "./traffic/model";
-import type { Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
+import {
+  computeLineFeatureBBoxes,
+  detectRoadClosuresFromBuildingRings,
+  extractPolygonRings,
+} from "./traffic/buildingClosures";
+import type { EdgeMetric, Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
 import { applyMetricsToRoads } from "./traffic/updateGeo";
 import { BuildingPlacer } from "./map/buildingPlacer";
 import { BuildingControls } from "./components/BuildingControls";
@@ -57,6 +67,12 @@ const TORONTO_BOUNDS: [[number, number], [number, number]] = [
 const MIN_ZOOM = 9;
 const MAX_ZOOM = 18;
 const FALLBACK_STYLE_URL = "https://demotiles.maplibre.org/style.json";
+const TRAFFIC_PARTICLE_SOURCE_ID = "traffic-particles";
+const TRAFFIC_PARTICLE_LAYER_ID = "traffic-particles";
+const TRAFFIC_PARTICLE_MAX_COUNT = 420;
+const TRAFFIC_ROUTE_POOL_MAX = 1600;
+const TRAFFIC_PARTICLE_FRAME_MS = 90;
+const TRAFFIC_PARTICLE_SPEED_SCALE = 1.25;
 
 const DEFAULT_STATS: SimulationStats = {
   nodes: 0,
@@ -183,6 +199,326 @@ function featureDistance2InPixels(
   return Number.POSITIVE_INFINITY;
 }
 
+type GeoJsonSourceWithData = maplibregl.GeoJSONSource & { _data?: GeoJSON.GeoJSON };
+type TrafficRoute = {
+  originNode: string;
+  destNode: string;
+  edgeIds: string[];
+};
+type TrafficParticle = {
+  id: string;
+  route: TrafficRoute;
+  edgeIndex: number;
+  edgeProgressM: number;
+  position: [number, number];
+};
+
+function squareFootprintRing(building: Building): Array<[number, number]> {
+  const sizeMeters = Math.max(1, Math.sqrt(Math.max(1, building.footprint)));
+  const offsetDegrees = (sizeMeters / 2) / 111000;
+  const [lng, lat] = building.coordinates;
+  return [
+    [lng - offsetDegrees, lat - offsetDegrees],
+    [lng + offsetDegrees, lat - offsetDegrees],
+    [lng + offsetDegrees, lat + offsetDegrees],
+    [lng - offsetDegrees, lat + offsetDegrees],
+    [lng - offsetDegrees, lat - offsetDegrees],
+  ];
+}
+
+function asFeatureCollection(
+  geojson: GeoJSON.GeoJSON | undefined,
+): GeoJSON.FeatureCollection | null {
+  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) {
+    return null;
+  }
+  return geojson;
+}
+
+function mergeClosedFeatureSets(...sets: ReadonlyArray<ReadonlySet<number>>): Set<number> {
+  const merged = new Set<number>();
+  for (const set of sets) {
+    for (const value of set) {
+      merged.add(value);
+    }
+  }
+  return merged;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function emptyTrafficPointCollection(): GeoJSON.FeatureCollection<
+  GeoJSON.Point,
+  { particleId: string }
+> {
+  return {
+    type: "FeatureCollection",
+    features: [],
+  };
+}
+
+function edgeSpeedMps(edgeLengthM: number, edgeMetric: EdgeMetric | undefined): number {
+  if (!edgeMetric || edgeMetric.closed || !Number.isFinite(edgeMetric.time) || edgeMetric.time <= 0) {
+    return 0;
+  }
+  return clampNumber(edgeLengthM / edgeMetric.time, 1.2, 30);
+}
+
+function interpolateAlongEdge(
+  edge: Graph["edges"][number],
+  progressM: number,
+): [number, number] {
+  const start = edge.coords[0];
+  const end = edge.coords[edge.coords.length - 1];
+  if (!start || !end) {
+    return [0, 0];
+  }
+  const edgeLength = Math.max(1, edge.lengthM);
+  const t = clampNumber(progressM / edgeLength, 0, 1);
+  return [
+    start[0] + (end[0] - start[0]) * t,
+    start[1] + (end[1] - start[1]) * t,
+  ];
+}
+
+function buildTrafficRoutePool(
+  graph: Graph,
+  odPairs: ODPair[],
+  edgeMetrics: Map<string, EdgeMetric>,
+): TrafficRoute[] {
+  const edgeTimes = new Map<string, number>();
+  for (const edge of graph.edges) {
+    const metric = edgeMetrics.get(edge.id);
+    if (!metric || metric.closed || !Number.isFinite(metric.time)) {
+      edgeTimes.set(edge.id, Number.POSITIVE_INFINITY);
+      continue;
+    }
+    edgeTimes.set(edge.id, Math.max(0.05, metric.time));
+  }
+
+  const routes: TrafficRoute[] = [];
+  const reverseAdjacency = buildReverseAdjacency(graph);
+  const byDestination = new Map<string, ODPair[]>();
+
+  for (const od of odPairs) {
+    const bucket = byDestination.get(od.destNode);
+    if (bucket) {
+      bucket.push(od);
+    } else {
+      byDestination.set(od.destNode, [od]);
+    }
+  }
+
+  for (const [destinationNode, destinationPairs] of byDestination) {
+    if (routes.length >= TRAFFIC_ROUTE_POOL_MAX) {
+      break;
+    }
+
+    const tree = dijkstraTreeToDestination(
+      graph,
+      destinationNode,
+      edgeTimes,
+      reverseAdjacency,
+    );
+
+    for (const od of destinationPairs) {
+      if (routes.length >= TRAFFIC_ROUTE_POOL_MAX) {
+        break;
+      }
+      const edgeIds = reconstructPathFromTree(graph, od.originNode, od.destNode, tree);
+      if (edgeIds.length === 0) {
+        continue;
+      }
+      routes.push({
+        originNode: od.originNode,
+        destNode: od.destNode,
+        edgeIds,
+      });
+    }
+  }
+
+  if (routes.length > 0) {
+    return routes;
+  }
+
+  for (const edge of graph.edges) {
+    if (routes.length >= TRAFFIC_ROUTE_POOL_MAX) {
+      break;
+    }
+    const metric = edgeMetrics.get(edge.id);
+    if (!metric || metric.closed || !Number.isFinite(metric.time)) {
+      continue;
+    }
+    routes.push({
+      originNode: edge.from,
+      destNode: edge.to,
+      edgeIds: [edge.id],
+    });
+  }
+
+  return routes;
+}
+
+function randomTrafficRoute(routePool: TrafficRoute[]): TrafficRoute | null {
+  if (routePool.length === 0) {
+    return null;
+  }
+  return routePool[Math.floor(Math.random() * routePool.length)] ?? null;
+}
+
+function assignParticleRoute(
+  particle: TrafficParticle,
+  graph: Graph,
+  routePool: TrafficRoute[],
+): boolean {
+  const route = randomTrafficRoute(routePool);
+  if (!route) {
+    return false;
+  }
+
+  const edgeIndex = Math.min(
+    route.edgeIds.length - 1,
+    Math.floor(Math.random() * Math.max(1, route.edgeIds.length)),
+  );
+  const edge = graph.edgesById.get(route.edgeIds[edgeIndex]);
+  if (!edge) {
+    return false;
+  }
+
+  const edgeProgressM = Math.random() * Math.max(1, edge.lengthM * 0.8);
+  particle.route = route;
+  particle.edgeIndex = edgeIndex;
+  particle.edgeProgressM = edgeProgressM;
+  particle.position = interpolateAlongEdge(edge, edgeProgressM);
+  return true;
+}
+
+function buildTrafficParticles(
+  graph: Graph,
+  routePool: TrafficRoute[],
+): TrafficParticle[] {
+  if (routePool.length === 0) {
+    return [];
+  }
+
+  const particleCount = clampNumber(
+    Math.max(40, Math.round(routePool.length * 0.14)),
+    40,
+    TRAFFIC_PARTICLE_MAX_COUNT,
+  );
+
+  const particles: TrafficParticle[] = [];
+  for (let index = 0; index < particleCount; index += 1) {
+    const route = randomTrafficRoute(routePool);
+    if (!route) {
+      break;
+    }
+    const firstEdge = graph.edgesById.get(route.edgeIds[0]);
+    if (!firstEdge) {
+      continue;
+    }
+    const particle: TrafficParticle = {
+      id: `particle-${index}`,
+      route,
+      edgeIndex: 0,
+      edgeProgressM: 0,
+      position: firstEdge.coords[0] ?? [0, 0],
+    };
+    if (!assignParticleRoute(particle, graph, routePool)) {
+      continue;
+    }
+    particles.push(particle);
+  }
+
+  return particles;
+}
+
+function advanceTrafficParticles(
+  particles: TrafficParticle[],
+  graph: Graph,
+  edgeMetrics: Map<string, EdgeMetric>,
+  routePool: TrafficRoute[],
+  deltaSeconds: number,
+): void {
+  if (particles.length === 0) {
+    return;
+  }
+
+  const dt = Math.max(0.01, Math.min(0.3, deltaSeconds));
+  for (const particle of particles) {
+    let edgeId = particle.route.edgeIds[particle.edgeIndex];
+    let edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+    let metric = edge ? edgeMetrics.get(edge.id) : undefined;
+
+    if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
+      if (!assignParticleRoute(particle, graph, routePool)) {
+        continue;
+      }
+      edgeId = particle.route.edgeIds[particle.edgeIndex];
+      edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+      metric = edge ? edgeMetrics.get(edge.id) : undefined;
+      if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
+        continue;
+      }
+    }
+
+    const speedMps = edgeSpeedMps(edge.lengthM, metric) * TRAFFIC_PARTICLE_SPEED_SCALE;
+    particle.edgeProgressM += speedMps * dt;
+
+    let edgeLength = Math.max(1, edge.lengthM);
+    let hop = 0;
+    while (particle.edgeProgressM >= edgeLength && hop < 6) {
+      particle.edgeProgressM -= edgeLength;
+      particle.edgeIndex += 1;
+      hop += 1;
+
+      if (particle.edgeIndex >= particle.route.edgeIds.length) {
+        if (!assignParticleRoute(particle, graph, routePool)) {
+          break;
+        }
+      }
+
+      edgeId = particle.route.edgeIds[particle.edgeIndex];
+      edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+      metric = edge ? edgeMetrics.get(edge.id) : undefined;
+      if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
+        if (!assignParticleRoute(particle, graph, routePool)) {
+          break;
+        }
+        edgeId = particle.route.edgeIds[particle.edgeIndex];
+        edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+        metric = edge ? edgeMetrics.get(edge.id) : undefined;
+        if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
+          break;
+        }
+      }
+      edgeLength = Math.max(1, edge.lengthM);
+    }
+
+    edgeId = particle.route.edgeIds[particle.edgeIndex];
+    edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+    if (!edge) {
+      continue;
+    }
+    particle.position = interpolateAlongEdge(edge, particle.edgeProgressM);
+  }
+}
+
+function trafficParticlesToFeatures(
+  particles: TrafficParticle[],
+): Array<GeoJSON.Feature<GeoJSON.Point, { particleId: string }>> {
+  return particles.map((particle) => ({
+    type: "Feature",
+    properties: { particleId: particle.id },
+    geometry: {
+      type: "Point",
+      coordinates: particle.position,
+    },
+  }));
+}
+
 export default function App() {
   const token =
     (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined) ??
@@ -197,11 +533,19 @@ export default function App() {
   const probePairsRef = useRef<ODPair[]>([]);
   const sampleSignatureRef = useRef("");
   const closureSeedNodeCountRef = useRef(0);
-  const closedFeaturesRef = useRef<Set<number>>(new Set<number>());
+  const manualClosedFeaturesRef = useRef<Set<number>>(new Set<number>());
+  const buildingClosedFeaturesRef = useRef<Set<number>>(new Set<number>());
+  const roadFeatureBBoxesRef = useRef<Array<[number, number, number, number]>>([]);
+  const trafficParticlesRef = useRef<TrafficParticle[]>([]);
+  const trafficRoutePoolRef = useRef<TrafficRoute[]>([]);
+  const trafficEdgeMetricsRef = useRef<Map<string, EdgeMetric>>(new Map());
+  const trafficAnimationFrameRef = useRef<number | null>(null);
+  const trafficLastFrameRef = useRef(0);
   const recomputeTimerRef = useRef<number | null>(null);
   const buildingPlacerRef = useRef<BuildingPlacer | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
   const polygonBuildingsRef = useRef<Map<string, GeoJSON.Feature>>(new Map());
+  const buildingModeRef = useRef(false);
   const shapeModeRef = useRef<"none" | "rectangle">("none");
   const rectHeightRef = useRef("40");
   const rectFirstCornerRef = useRef<[number, number] | null>(null);
@@ -232,6 +576,10 @@ export default function App() {
   useEffect(() => {
     shapeModeRef.current = shapeMode;
   }, [shapeMode]);
+
+  useEffect(() => {
+    buildingModeRef.current = buildingMode;
+  }, [buildingMode]);
 
   useEffect(() => {
     rectHeightRef.current = rectHeight;
@@ -347,6 +695,126 @@ export default function App() {
     [ensurePolygonBuildingsLayer],
   );
 
+  const ensureTrafficParticleLayer = useCallback((map: maplibregl.Map) => {
+    if (!map.getSource(TRAFFIC_PARTICLE_SOURCE_ID)) {
+      map.addSource(TRAFFIC_PARTICLE_SOURCE_ID, {
+        type: "geojson",
+        data: emptyTrafficPointCollection(),
+      });
+    }
+
+    if (!map.getLayer(TRAFFIC_PARTICLE_LAYER_ID)) {
+      map.addLayer({
+        id: TRAFFIC_PARTICLE_LAYER_ID,
+        type: "circle",
+        source: TRAFFIC_PARTICLE_SOURCE_ID,
+        paint: {
+          "circle-color": "#22d3ee",
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.4, 14, 4.6, 17, 7.2],
+          "circle-opacity": 0.96,
+          "circle-blur": 0.06,
+          "circle-pitch-alignment": "map",
+          "circle-pitch-scale": "map",
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1,
+        },
+      });
+    }
+  }, []);
+
+  const bringTrafficParticlesToFront = useCallback((map: maplibregl.Map) => {
+    if (!map.getLayer(TRAFFIC_PARTICLE_LAYER_ID)) {
+      return;
+    }
+    try {
+      map.moveLayer(TRAFFIC_PARTICLE_LAYER_ID);
+    } catch {
+      // no-op
+    }
+  }, []);
+
+  const updateTrafficParticleSource = useCallback(
+    (
+      map: maplibregl.Map,
+      features: Array<GeoJSON.Feature<GeoJSON.Point, { particleId: string }>>,
+    ) => {
+      ensureTrafficParticleLayer(map);
+      bringTrafficParticlesToFront(map);
+      const source = map.getSource(TRAFFIC_PARTICLE_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+      if (!source) {
+        return;
+      }
+      source.setData({
+        type: "FeatureCollection",
+        features,
+      });
+    },
+    [bringTrafficParticlesToFront, ensureTrafficParticleLayer],
+  );
+
+  const stopTrafficParticleAnimation = useCallback(() => {
+    if (trafficAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(trafficAnimationFrameRef.current);
+      trafficAnimationFrameRef.current = null;
+    }
+  }, []);
+
+  const startTrafficParticleAnimation = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+
+    ensureTrafficParticleLayer(map);
+    stopTrafficParticleAnimation();
+    trafficLastFrameRef.current = 0;
+    if (trafficParticlesRef.current.length === 0) {
+      updateTrafficParticleSource(map, []);
+      return;
+    }
+    updateTrafficParticleSource(map, trafficParticlesToFeatures(trafficParticlesRef.current));
+
+    const animate = (timestampMs: number) => {
+      const activeMap = mapRef.current;
+      const activeGraph = graphRef.current;
+      if (!activeMap) {
+        trafficAnimationFrameRef.current = null;
+        return;
+      }
+      if (!activeGraph) {
+        trafficAnimationFrameRef.current = null;
+        return;
+      }
+
+      if (trafficLastFrameRef.current <= 0) {
+        trafficLastFrameRef.current = timestampMs;
+      }
+      const deltaMs = timestampMs - trafficLastFrameRef.current;
+
+      if (deltaMs >= TRAFFIC_PARTICLE_FRAME_MS) {
+        trafficLastFrameRef.current = timestampMs;
+        const particles = trafficParticlesRef.current;
+
+        if (particles.length === 0) {
+          updateTrafficParticleSource(activeMap, []);
+        } else {
+          advanceTrafficParticles(
+            particles,
+            activeGraph,
+            trafficEdgeMetricsRef.current,
+            trafficRoutePoolRef.current,
+            deltaMs / 1000,
+          );
+          updateTrafficParticleSource(activeMap, trafficParticlesToFeatures(particles));
+        }
+      }
+
+      trafficAnimationFrameRef.current = window.requestAnimationFrame(animate);
+    };
+
+    trafficAnimationFrameRef.current = window.requestAnimationFrame(animate);
+  }, [ensureTrafficParticleLayer, stopTrafficParticleAnimation, updateTrafficParticleSource]);
+
   const addPolygonBuilding = useCallback(
     (map: maplibregl.Map, feature: GeoJSON.Feature) => {
       setPolygonBuildings((prev) => {
@@ -358,6 +826,48 @@ export default function App() {
       });
     },
     [updatePolygonBuildingsSource],
+  );
+
+  const collectBuildingRings = useCallback((): Array<[number, number][]> => {
+    const rings: Array<[number, number][]> = [];
+
+    const placedBuildings = buildingPlacerRef.current?.getAllBuildings() ?? [];
+    for (const building of placedBuildings) {
+      rings.push(squareFootprintRing(building));
+    }
+
+    for (const feature of polygonBuildingsRef.current.values()) {
+      rings.push(...extractPolygonRings(feature));
+    }
+
+    const map = mapRef.current;
+    if (!map) {
+      return rings;
+    }
+
+    const customBuildingsSource = map.getSource("custom-buildings") as GeoJsonSourceWithData | undefined;
+    const customBuildingsData = asFeatureCollection(customBuildingsSource?._data);
+    if (customBuildingsData) {
+      for (const feature of customBuildingsData.features) {
+        rings.push(...extractPolygonRings(feature));
+      }
+    }
+
+    return rings;
+  }, []);
+
+  const computeEffectiveClosedFeatures = useCallback(
+    (roads: RoadCollection): Set<number> => {
+      const buildingRings = collectBuildingRings();
+      const buildingClosures = detectRoadClosuresFromBuildingRings(
+        roads,
+        buildingRings,
+        roadFeatureBBoxesRef.current,
+      );
+      buildingClosedFeaturesRef.current = buildingClosures;
+      return mergeClosedFeatureSets(manualClosedFeaturesRef.current, buildingClosures);
+    },
+    [collectBuildingRings],
   );
 
   const buildAdaptiveSamples = useCallback(
@@ -407,39 +917,51 @@ export default function App() {
       nodes: graph.nodes.size,
       edges: graph.edges.length,
       trips: odPairsRef.current.length,
-      closed: closedFeaturesRef.current.size,
+      closed: manualClosedFeaturesRef.current.size + buildingClosedFeaturesRef.current.size,
+      manualClosed: manualClosedFeaturesRef.current.size,
+      buildingClosed: buildingClosedFeaturesRef.current.size,
     });
 
     setIsComputing(true);
     setShowResultsPanel(true);
 
-    const sampleSignature = Array.from(closedFeaturesRef.current)
+    const effectiveClosedFeatures = computeEffectiveClosedFeatures(roads);
+    const manualClosedCount = manualClosedFeaturesRef.current.size;
+    const buildingClosedCount = buildingClosedFeaturesRef.current.size;
+
+    const sampleSignature = Array.from(effectiveClosedFeatures)
       .sort((a, b) => a - b)
       .join(",");
     if (sampleSignature !== sampleSignatureRef.current) {
-      const adaptiveSamples = buildAdaptiveSamples(graph, closedFeaturesRef.current);
+      const adaptiveSamples = buildAdaptiveSamples(graph, effectiveClosedFeatures);
       odPairsRef.current = adaptiveSamples.odPairs;
       closureSeedNodeCountRef.current = adaptiveSamples.closureSeedNodes;
       sampleSignatureRef.current = sampleSignature;
     }
 
     const start = performance.now();
-    const result = assignTraffic(graph, closedFeaturesRef.current, odPairsRef.current, 2);
+    const result = assignTraffic(graph, effectiveClosedFeatures, odPairsRef.current, 2);
     const unreachableTrips = countDisconnectedTrips(
       graph,
-      closedFeaturesRef.current,
+      effectiveClosedFeatures,
       probePairsRef.current,
     );
+    trafficEdgeMetricsRef.current = result.edgeMetrics;
+    trafficRoutePoolRef.current = buildTrafficRoutePool(graph, odPairsRef.current, result.edgeMetrics);
+    trafficParticlesRef.current = buildTrafficParticles(graph, trafficRoutePoolRef.current);
+    startTrafficParticleAnimation();
     const updatedRoads = applyMetricsToRoads(roads, result.featureMetrics);
     updateRoadSourceData(map, updatedRoads);
+    bringTrafficParticlesToFront(map);
     const runtimeMs = Math.round(performance.now() - start);
+    const liveParticleCount = trafficParticlesRef.current.length;
 
     const newStats = {
       nodes: graph.nodes.size,
       directedEdges: graph.edges.length,
       trips: odPairsRef.current.length,
       probeTrips: probePairsRef.current.length,
-      closed: closedFeaturesRef.current.size,
+      closed: effectiveClosedFeatures.size,
       closureSeedNodes: closureSeedNodeCountRef.current,
       runtimeMs,
       unreachable: unreachableTrips,
@@ -449,16 +971,23 @@ export default function App() {
 
     console.log("✅ [RECOMPUTE] Simulation complete:", {
       runtime: `${runtimeMs}ms`,
-      closedSegments: closedFeaturesRef.current.size,
+      closedSegments: effectiveClosedFeatures.size,
+      manualClosed: manualClosedCount,
+      buildingClosed: buildingClosedCount,
       unreachableTrips,
       avgDelay: ((unreachableTrips / odPairsRef.current.length) * 100).toFixed(1) + "%",
     });
 
     setStatusText(
-      `Heatmap updated in ${runtimeMs} ms (${odPairsRef.current.length} OD / ${probePairsRef.current.length} fixed probes).`,
+      `Heatmap updated in ${runtimeMs} ms (${effectiveClosedFeatures.size} closed = ${manualClosedCount} manual + ${buildingClosedCount} blocked by buildings, ${liveParticleCount} live vehicles).`,
     );
     setIsComputing(false);
-  }, [buildAdaptiveSamples]);
+  }, [
+    bringTrafficParticlesToFront,
+    buildAdaptiveSamples,
+    computeEffectiveClosedFeatures,
+    startTrafficParticleAnimation,
+  ]);
 
   const scheduleSimulation = useCallback(
     (delayMs = 300) => {
@@ -484,11 +1013,13 @@ export default function App() {
       const raw = (await response.json()) as unknown;
       const roads = parseRoadCollection(raw);
       roadsRef.current = roads;
+      roadFeatureBBoxesRef.current = computeLineFeatureBBoxes(roads);
 
       const graph = buildGraphFromGeoJSON(roads);
       graphRef.current = graph;
 
-      const adaptiveSamples = buildAdaptiveSamples(graph, closedFeaturesRef.current);
+      const effectiveClosedFeatures = computeEffectiveClosedFeatures(roads);
+      const adaptiveSamples = buildAdaptiveSamples(graph, effectiveClosedFeatures);
       odPairsRef.current = adaptiveSamples.odPairs;
       const stableProbeCount = Math.max(1200, Math.min(3200, Math.round(graph.nodes.size * 0.35)));
       probePairsRef.current = generateReachabilityProbe(graph, stableProbeCount);
@@ -496,14 +1027,19 @@ export default function App() {
       sampleSignatureRef.current = "";
 
       const start = performance.now();
-      const baseline = assignTraffic(graph, closedFeaturesRef.current, odPairsRef.current, 2);
+      const baseline = assignTraffic(graph, effectiveClosedFeatures, odPairsRef.current, 2);
       const unreachableTrips = countDisconnectedTrips(
         graph,
-        closedFeaturesRef.current,
+        effectiveClosedFeatures,
         probePairsRef.current,
       );
+      trafficEdgeMetricsRef.current = baseline.edgeMetrics;
+      trafficRoutePoolRef.current = buildTrafficRoutePool(graph, odPairsRef.current, baseline.edgeMetrics);
+      trafficParticlesRef.current = buildTrafficParticles(graph, trafficRoutePoolRef.current);
+      startTrafficParticleAnimation();
       const roadsWithMetrics = applyMetricsToRoads(roads, baseline.featureMetrics);
       addRoadLayers(map, roadsWithMetrics);
+      bringTrafficParticlesToFront(map);
       const runtimeMs = Math.round(performance.now() - start);
 
       setStats({
@@ -511,7 +1047,7 @@ export default function App() {
         directedEdges: graph.edges.length,
         trips: odPairsRef.current.length,
         probeTrips: probePairsRef.current.length,
-        closed: 0,
+        closed: effectiveClosedFeatures.size,
         closureSeedNodes: adaptiveSamples.closureSeedNodes,
         runtimeMs,
         unreachable: unreachableTrips,
@@ -520,7 +1056,12 @@ export default function App() {
         `Loaded ${roads.features.length} roads, ${graph.nodes.size} nodes, ${odPairsRef.current.length} OD trips.`,
       );
     },
-    [buildAdaptiveSamples],
+    [
+      bringTrafficParticlesToFront,
+      buildAdaptiveSamples,
+      computeEffectiveClosedFeatures,
+      startTrafficParticleAnimation,
+    ],
   );
 
   useEffect(() => {
@@ -591,6 +1132,8 @@ export default function App() {
       ensureUserSourceAndLayer();
       ensurePolygonBuildingsLayer(map);
       updatePolygonBuildingsSource(map, polygonBuildingsRef.current);
+      ensureTrafficParticleLayer(map);
+      bringTrafficParticlesToFront(map);
 
       const layers = map.getStyle().layers || [];
       const labelLayerId = layers.find(
@@ -645,12 +1188,14 @@ export default function App() {
           console.log("Building placed:", building);
           setSelectedBuilding(building);
           setBuildingMode(false); // Exit building mode after placement
+          scheduleSimulation(0);
         },
         onBuildingSelected: (building) => {
           setSelectedBuilding(building);
         },
         onBuildingUpdated: (building) => {
           setSelectedBuilding(building);
+          scheduleSimulation(120);
         },
       });
       buildingPlacerRef.current = placer;
@@ -690,6 +1235,7 @@ export default function App() {
           };
 
           addPolygonBuilding(map, buildingFeature);
+          scheduleSimulation(0);
 
           if (draw) {
             draw.delete(feature.id);
@@ -713,6 +1259,7 @@ export default function App() {
           updatePolygonBuildingsSource(map, next);
           return next;
         });
+        scheduleSimulation(0);
       };
 
       if (draw) {
@@ -772,9 +1319,14 @@ export default function App() {
         };
 
         addPolygonBuilding(map, buildingFeature);
+        scheduleSimulation(0);
         rectFirstCornerRef.current = null;
         setRectFirstCorner(null);
         setStatusText(`Building created (height ${heightValue}m). Click two corners to add another.`);
+        return;
+      }
+
+      if (buildingModeRef.current) {
         return;
       }
 
@@ -821,10 +1373,10 @@ export default function App() {
         return;
       }
 
-      if (closedFeaturesRef.current.has(featureIndex)) {
-        closedFeaturesRef.current.delete(featureIndex);
+      if (manualClosedFeaturesRef.current.has(featureIndex)) {
+        manualClosedFeaturesRef.current.delete(featureIndex);
       } else {
-        closedFeaturesRef.current.add(featureIndex);
+        manualClosedFeaturesRef.current.add(featureIndex);
       }
       scheduleSimulation();
     };
@@ -867,6 +1419,10 @@ export default function App() {
       if (recomputeTimerRef.current !== null) {
         window.clearTimeout(recomputeTimerRef.current);
       }
+      stopTrafficParticleAnimation();
+      trafficParticlesRef.current = [];
+      trafficRoutePoolRef.current = [];
+      trafficEdgeMetricsRef.current = new Map();
       buildingPlacerRef.current?.destroy();
       if (drawControlRef.current) {
         const handlers = (map as any)._polygonHandlers;
@@ -892,23 +1448,27 @@ export default function App() {
     };
   }, [
     addPolygonBuilding,
+    bringTrafficParticlesToFront,
     ensurePolygonBuildingsLayer,
+    ensureTrafficParticleLayer,
     loadRoadNetwork,
     mapStyle,
     refreshCustomBuildings,
     scheduleSimulation,
+    stopTrafficParticleAnimation,
     updatePolygonBuildingsSource,
   ]);
 
   const handleResetClosures = useCallback(() => {
     console.log("🔄 [RESET CLOSURES] Clearing all road closures...");
-    if (closedFeaturesRef.current.size === 0) {
-      console.log("ℹ️ [RESET CLOSURES] No closures to reset");
+    if (manualClosedFeaturesRef.current.size === 0) {
+      console.log("ℹ️ [RESET CLOSURES] No manual closures to reset");
+      scheduleSimulation(0);
       return;
     }
-    const closedCount = closedFeaturesRef.current.size;
-    closedFeaturesRef.current.clear();
-    console.log(`✅ [RESET CLOSURES] Cleared ${closedCount} road closures`);
+    const closedCount = manualClosedFeaturesRef.current.size;
+    manualClosedFeaturesRef.current.clear();
+    console.log(`✅ [RESET CLOSURES] Cleared ${closedCount} manual road closures`);
     scheduleSimulation(0);
   }, [scheduleSimulation]);
 
@@ -966,8 +1526,9 @@ export default function App() {
     if (selectedBuilding) {
       buildingPlacerRef.current?.deleteBuilding(selectedBuilding.id);
       setSelectedBuilding(null);
+      scheduleSimulation(0);
     }
-  }, [selectedBuilding]);
+  }, [scheduleSimulation, selectedBuilding]);
 
   const handleAnalyzeBuilding = useCallback(() => {
     if (selectedBuilding) {
@@ -1118,6 +1679,7 @@ export default function App() {
           <span className="chip flow-mid">delay 1.3+</span>
           <span className="chip flow-high">delay 1.8+</span>
           <span className="chip flow-closed">closed</span>
+          <span className="chip flow-live">live flow</span>
         </div>
       </section>
 
