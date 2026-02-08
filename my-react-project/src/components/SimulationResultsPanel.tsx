@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import type maplibregl from "maplibre-gl";
 import type { SimulationStats } from "../App";
-import getBackboardClient from "../lib/backboard";
 
 interface NearbyPlace {
   name: string;
