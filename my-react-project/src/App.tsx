@@ -636,7 +636,7 @@ export default function App() {
               },
             });
           } else {
-            const currentData = source._data as GeoJSON.FeatureCollection;
+            const currentData = source._data as unknown as GeoJSON.FeatureCollection;
             source.setData({
               ...currentData,
               features: [...currentData.features, buildingFeature],
