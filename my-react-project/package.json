@@ -16,6 +16,7 @@
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "^1.5.1",
     "@mapbox/mapbox-gl-geocoder": "^5.1.2",
+    "@supabase/supabase-js": "^2.95.3",
     "@turf/turf": "^7.3.3",
     "dotenv": "^17.2.4",
     "mapbox-gl": "^3.18.1",

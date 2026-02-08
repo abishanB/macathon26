@@ -229,6 +229,194 @@ Example format:
   }
 
   /**
+   * Analyze building construction impact on urban systems
+   * Returns comprehensive impact analysis covering traffic, environment, compliance
+   */
+  async analyzeConstructionImpact(
+    threadId: string,
+    constructionDetails: {
+      location: [number, number]; // [lng, lat]
+      buildingType: string;
+      stories: number;
+      footprint: number; // m²
+      duration: number; // months
+      laneClosures: number;
+      parkingLost: number;
+      deliveryTrucks: number;
+      excavationDepth: number;
+      workHours: { start: string; end: string; weekend: boolean; night: boolean };
+      dustControl: boolean;
+      noiseControl: boolean;
+      expectedOccupancy: number;
+    }
+  ) {
+    const query = `Analyze the impact of this proposed building construction in Toronto:
+
+LOCATION: ${constructionDetails.location[1].toFixed(4)}, ${constructionDetails.location[0].toFixed(4)}
+
+BUILDING DETAILS:
+- Type: ${constructionDetails.buildingType}
+- Stories: ${constructionDetails.stories}
+- Footprint: ${constructionDetails.footprint}m²
+- Post-completion occupancy: ${constructionDetails.expectedOccupancy} people/day
+
+CONSTRUCTION DETAILS:
+- Duration: ${constructionDetails.duration} months
+- Work hours: ${constructionDetails.workHours.start} - ${constructionDetails.workHours.end}
+- Weekend work: ${constructionDetails.workHours.weekend ? 'Yes' : 'No'}
+- Night construction: ${constructionDetails.workHours.night ? 'Yes' : 'No'}
+- Excavation depth: ${constructionDetails.excavationDepth}m
+
+TRAFFIC IMPACT:
+- Lane closures: ${constructionDetails.laneClosures}
+- Parking spaces lost: ${constructionDetails.parkingLost}
+- Delivery trucks per day: ${constructionDetails.deliveryTrucks}
+
+ENVIRONMENTAL CONTROLS:
+- Dust control measures: ${constructionDetails.dustControl ? 'Yes' : 'No'}
+- Noise control measures: ${constructionDetails.noiseControl ? 'Yes' : 'No'}
+
+Provide a COMPREHENSIVE analysis in JSON format:
+{
+  "trafficImpact": {
+    "estimatedDelay": <number (%)>,
+    "peakHourDelay": <number (minutes)>,
+    "affectedRoutes": [<list of potentially affected routes>],
+    "detourRequired": <boolean>,
+    "transitImpact": "<description>",
+    "complianceStatus": "<compliant|requires-mitigation|non-compliant>"
+  },
+  "environmental": {
+    "airQuality": {
+      "pm10Estimate": <number (μg/m³)>,
+      "pm25Estimate": <number (μg/m³)>,
+      "dustLevel": "<low|medium|high>",
+      "complianceStatus": "<compliant|requires-mitigation|non-compliant>"
+    },
+    "noise": {
+      "peakNoiseLevel": <number (dB)>,
+      "exceedsLimits": <boolean>,
+      "mitigationRequired": <boolean>,
+      "complianceWithBylaw": "<compliant|non-compliant>"
+    }
+  },
+  "economicImpact": {
+    "businessImpact": "<minimal|moderate|significant|severe>",
+    "estimatedBusinessLoss": <number ($ CAD)>,
+    "affectedBusinessCount": <number>
+  },
+  "compliance": {
+    "requiredPermits": [<list of permits>],
+    "trafficManagementPlanRequired": <boolean>,
+    "environmentalAssessment": <boolean>,
+    "communityConsultation": <boolean>,
+    "mitigationMeasures": [<list of required actions>]
+  },
+  "overall": {
+    "riskLevel": "<low|medium|high|critical>",
+    "severity": <1-10>,
+    "recommendedActions": [<list of recommended actions>],
+    "estimatedTotalImpact": "<summary>"
+  },
+  "narrative": "<comprehensive 2-3 paragraph analysis covering all impacts and Toronto-specific requirements>"
+}
+
+Base your analysis on:
+- TIS Guidelines 2013 (delay thresholds, peak hours)
+- CMP 2023-26 (traffic management, construction coordination)
+- Noise Bylaw 2026 (65dB limits, work hours 7AM-7PM)
+- Traffic Disruption Management 2015 (lane closures, TTC coordination)
+- RoDARS requirements (permits, fees, notice periods)
+- Environmental pollution from construction (PM10/PM2.5 standards)
+
+Focus on:
+1. Traffic congestion and delay analysis (>5% delay threshold)
+2. Environmental impacts (air quality, noise, dust)
+3. Transit route disruptions
+4. Economic impact on local businesses
+5. Regulatory compliance requirements
+6. Required mitigation measures
+
+Provide specific, quantitative estimates where possible, and cite relevant Toronto regulations.`;
+
+    const result = await this.addMessage(threadId, query);
+    const answer = result.answer || result.content || result.message || '';
+
+    // Try to parse JSON from the answer
+    try {
+      // Look for JSON in the response
+      const jsonMatch = answer.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          ...parsed,
+          sources: result.sources || [],
+          rawAnswer: answer,
+        };
+      }
+    } catch (e) {
+      console.error('Failed to parse JSON response:', e);
+    }
+
+    // Fallback structured response if parsing fails
+    return {
+      trafficImpact: {
+        estimatedDelay: constructionDetails.laneClosures > 1 ? 7 : 3,
+        peakHourDelay: constructionDetails.laneClosures * 5 + constructionDetails.deliveryTrucks * 0.5,
+        affectedRoutes: ['Major arterial roads within 500m'],
+        detourRequired: constructionDetails.laneClosures > 1,
+        transitImpact: 'Minor delays possible if near transit routes',
+        complianceStatus: 'requires-mitigation',
+      },
+      environmental: {
+        airQuality: {
+          pm10Estimate: constructionDetails.dustControl ? 50 : 150,
+          pm25Estimate: constructionDetails.dustControl ? 25 : 75,
+          dustLevel: constructionDetails.dustControl ? 'low' : 'high',
+          complianceStatus: constructionDetails.dustControl ? 'compliant' : 'requires-mitigation',
+        },
+        noise: {
+          peakNoiseLevel: constructionDetails.noiseControl ? 65 : 80,
+          exceedsLimits: !constructionDetails.noiseControl || constructionDetails.workHours.night,
+          mitigationRequired: !constructionDetails.noiseControl,
+          complianceWithBylaw: constructionDetails.noiseControl && !constructionDetails.workHours.night ? 'compliant' : 'non-compliant',
+        },
+      },
+      economicImpact: {
+        businessImpact: constructionDetails.laneClosures > 2 ? 'significant' : 'moderate',
+        estimatedBusinessLoss: constructionDetails.duration * constructionDetails.laneClosures * 10000,
+        affectedBusinessCount: Math.floor(constructionDetails.footprint / 100),
+      },
+      compliance: {
+        requiredPermits: ['Building Permit', 'RoDARS Permit', 'Lane Closure Permit'],
+        trafficManagementPlanRequired: constructionDetails.laneClosures > 0,
+        environmentalAssessment: constructionDetails.stories > 10,
+        communityConsultation: true,
+        mitigationMeasures: [
+          'Implement dust control measures',
+          'Traffic management plan required',
+          'Coordinate with TTC if near transit routes',
+          'Limit work to 7AM-7PM weekdays',
+        ],
+      },
+      overall: {
+        riskLevel: constructionDetails.laneClosures > 2 ? 'high' : 'medium',
+        severity: Math.min(10, 3 + constructionDetails.laneClosures * 2),
+        recommendedActions: [
+          'Submit Traffic Management Plan',
+          'Obtain required permits before start',
+          'Implement environmental controls',
+          'Coordinate with local businesses',
+        ],
+        estimatedTotalImpact: answer.substring(0, 300) || 'Moderate impact expected. Mitigation required.',
+      },
+      narrative: answer || 'Unable to generate detailed analysis. Please review construction parameters.',
+      sources: result.sources || [],
+      rawAnswer: answer,
+    };
+  }
+
+  /**
    * Analyze simulation results against Toronto regulations
    * Returns structured analysis with severity, compliance, and recommendations
    */
@@ -256,7 +444,7 @@ Example format:
     const locationContext = location ? `Location: ${location}. ` : '';
     const delay = simResults.delay || 0;
     const peakImpact = simResults.peakHourImpact || 0;
-    
+
     const analysisQuery = `${locationContext}Analyze these traffic simulation results against Toronto regulations:
 
 Simulation Results:
@@ -289,7 +477,7 @@ Provide the JSON response with specific, actionable recommendations.`;
 
     const result = await this.addMessage(threadId, analysisQuery);
     const answer = result.answer || result.content || result.message || '';
-    
+
     // Try to parse JSON from the answer
     try {
       const jsonMatch = answer.match(/\{[\s\S]*\}/);

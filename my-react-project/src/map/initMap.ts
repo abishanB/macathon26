@@ -15,6 +15,6 @@ export function initMap(container: HTMLDivElement, token: string): mapboxgl.Map 
     antialias: true,
   });
 
-  map.addControl(new mapboxgl.NavigationControl(), "top-right");
+  map.addControl(new mapboxgl.NavigationControl(), "top-left");
   return map;
 }
