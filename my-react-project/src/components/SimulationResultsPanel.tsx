@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import type maplibregl from "maplibre-gl";
 import type { SimulationStats } from "../App";
+import getBackboardClient from "../lib/backboard";
 
 interface NearbyPlace {
   name: string;
@@ -226,6 +227,8 @@ export function SimulationResultsPanel({
 }: SimulationResultsPanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
   const [nearbyBuildings, setNearbyBuildings] = useState<NearbyPlace[]>([]);
+  const [aiAnalysis, setAiAnalysis] = useState<string>('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // Query nearby buildings when panel opens or center changes
   useEffect(() => {
@@ -291,6 +294,95 @@ export function SimulationResultsPanel({
     
     fetchNearbyBuildingsWithAddresses();
   }, [map, centerPoint, isVisible, isMinimized]);
+
+  // AI Analysis of nearby buildings impact
+  useEffect(() => {
+    if (!isVisible || isMinimized || nearbyBuildings.length === 0 || isAnalyzing) {
+      return;
+    }
+
+    async function analyzeNearbyBuildingsImpact() {
+      setIsAnalyzing(true);
+      console.log('[AI Analysis] Starting analysis of nearby buildings...');
+      
+      try {
+        const apiKey = import.meta.env.VITE_BACKBOARD_API_KEY;
+        
+        if (!apiKey) {
+          console.warn('[AI Analysis] No Backboard API key found');
+          setAiAnalysis('');
+          setIsAnalyzing(false);
+          return;
+        }
+
+        const backboard = getBackboardClient();
+
+        // Build context about nearby buildings
+        const buildingsList = nearbyBuildings.map((b, i) => 
+          `${i + 1}. ${b.name} (${b.type}) - ${b.address}`
+        ).join('\n');
+
+        const buildingTypes = nearbyBuildings.map(b => b.type);
+        const uniqueTypes = [...new Set(buildingTypes)];
+
+        const query = `Analyze the impact of a NEW CONSTRUCTION PROJECT given these nearby buildings:
+
+NEARBY BUILDINGS (within immediate vicinity, 2-10m radius):
+${buildingsList}
+
+BUILDING TYPES PRESENT: ${uniqueTypes.join(', ')}
+
+CONSTRUCTION DETAILS:
+- Buildings placed: ${buildingCount}
+- Road segments closed: ${closedRoads}
+- Traffic congestion: ${stats.closed > 0 ? 'Medium-High' : 'Low'}
+
+Provide a brief, actionable analysis (3-5 sentences max) covering:
+
+1. BUSINESS IMPACT: If multiple similar businesses (restaurants, stores, schools), discuss:
+   - Competition effects (2+ restaurants = increased competition)
+   - Market saturation concerns
+   - Customer base dilution
+
+2. FEASIBILITY CONCERNS: If unusual patterns detected:
+   - Multiple schools/institutions (class size, enrollment impact)
+   - Conflicting uses (industrial near residential)
+   - Over-concentration of single type
+
+3. COMMUNITY IMPACT: Consider:
+   - Access disruption to essential services (hospitals, schools)
+   - Parking shortage effects on nearby businesses
+   - Foot traffic changes during construction
+
+4. OPPORTUNITIES: Positive aspects:
+   - Complementary businesses (coffee shop + bookstore)
+   - Mixed-use development benefits
+   - Urban density improvements
+
+Keep response concise, specific, and Toronto-focused. Use plain language for city planners.`;
+
+        // Use a dedicated thread ID for context analysis
+        const threadId = 'context_analysis_thread';
+        
+        const result = await backboard.addMessage(threadId, query, {
+          llm_provider: 'openrouter',
+          model_name: 'google/gemini-2.0-flash-exp',
+        });
+
+        const analysis = result.answer || result.content || result.message || '';
+        console.log('[AI Analysis] Complete. Length:', analysis.length, 'chars');
+        
+        setAiAnalysis(analysis);
+      } catch (error) {
+        console.error('[AI Analysis] Failed:', error);
+        setAiAnalysis('');
+      } finally {
+        setIsAnalyzing(false);
+      }
+    }
+
+    analyzeNearbyBuildingsImpact();
+  }, [nearbyBuildings, buildingCount, closedRoads, stats.closed, isVisible, isMinimized, isAnalyzing]);
 
   if (!isVisible) return null;
 
@@ -492,6 +584,73 @@ export function SimulationResultsPanel({
                   </div>
                 ))}
               </div>
+            </section>
+          )}
+
+          {/* AI-Powered Context Analysis */}
+          {nearbyBuildings.length > 0 && (
+            <section style={{ marginBottom: "16px" }}>
+              <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "8px", color: "#1f2937" }}>
+                🤖 AI Impact Analysis
+              </h3>
+              {isAnalyzing ? (
+                <div style={{ 
+                  padding: "12px", 
+                  background: "#f0f9ff", 
+                  borderRadius: "6px",
+                  border: "1px solid #bae6fd",
+                  fontSize: "12px",
+                  color: "#0369a1",
+                  textAlign: "center"
+                }}>
+                  <div style={{ marginBottom: "6px" }}>🔄 Analyzing nearby context...</div>
+                  <div style={{ fontSize: "10px", color: "#0c4a6e" }}>
+                    Evaluating business competition, feasibility, and community impact
+                  </div>
+                </div>
+              ) : aiAnalysis ? (
+                <div style={{ 
+                  padding: "10px", 
+                  background: "#fefce8", 
+                  borderRadius: "6px",
+                  border: "1px solid #fde047",
+                  fontSize: "11px",
+                  color: "#713f12",
+                  lineHeight: "1.6"
+                }}>
+                  <div style={{ 
+                    fontWeight: "600", 
+                    marginBottom: "6px", 
+                    color: "#854d0e",
+                    fontSize: "12px"
+                  }}>
+                    Contextual Insights:
+                  </div>
+                  <div style={{ whiteSpace: "pre-wrap" }}>
+                    {aiAnalysis}
+                  </div>
+                  <div style={{ 
+                    marginTop: "8px", 
+                    paddingTop: "8px", 
+                    borderTop: "1px solid #fde047",
+                    fontSize: "10px",
+                    color: "#a16207"
+                  }}>
+                    ⚡ Powered by Gemini 2.0 Flash · Based on local building context
+                  </div>
+                </div>
+              ) : (
+                <div style={{ 
+                  padding: "8px", 
+                  background: "#f3f4f6", 
+                  borderRadius: "6px",
+                  fontSize: "11px",
+                  color: "#6b7280",
+                  fontStyle: "italic"
+                }}>
+                  Enable AI analysis by setting VITE_BACKBOARD_API_KEY in .env
+                </div>
+              )}
             </section>
           )}
 
