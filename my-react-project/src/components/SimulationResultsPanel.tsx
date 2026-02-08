@@ -307,10 +307,7 @@ export function SimulationResultsPanel({
   }, [map, centerPoint, isVisible, isMinimized]);
 
   // AI Analysis of nearby buildings impact
-  // DISABLED: CORS issue - requires backend proxy
   useEffect(() => {
-    return; // Exit early - AI analysis disabled
-    
     if (!isVisible || isMinimized || nearbyBuildings.length === 0 || isAnalyzing) {
       return;
     }
@@ -320,16 +317,6 @@ export function SimulationResultsPanel({
       console.log('[AI Analysis] Starting analysis of nearby buildings...');
       
       try {
-        const apiKey = import.meta.env.VITE_BACKBOARD_API_KEY;
-        
-        if (!apiKey) {
-          console.warn('[AI Analysis] No Backboard API key found');
-          setAiAnalysis('');
-          setIsAnalyzing(false);
-          return;
-        }
-
-        const backboard = getBackboardClient();
 
         // Build context about nearby buildings
         const buildingsList = nearbyBuildings.map((b, i) => 
@@ -375,14 +362,30 @@ Provide a brief, actionable analysis (3-5 sentences max) covering:
 
 Keep response concise, specific, and Toronto-focused. Use plain language for city planners.`;
 
-        // Use a dedicated thread ID for context analysis
-        const threadId = 'context_analysis_thread';
-        
-        const result = await backboard.addMessage(threadId, query, {
-          llm_provider: 'openrouter',
-          model_name: 'google/gemini-2.0-flash-exp',
+        // Call backend proxy (avoids CORS issues)
+        const response = await fetch('http://localhost:3001/api/ai/analyze', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            threadId: 'context_analysis_thread',
+            query,
+            options: {
+              llm_provider: 'openrouter',
+              model_name: 'google/gemini-2.0-flash-exp',
+            }
+          }),
         });
 
+        if (!response.ok) {
+          const error = await response.json();
+          console.error('[AI Analysis] API error:', error);
+          setAiAnalysis('');
+          return;
+        }
+
+        const result = await response.json();
         const analysis = result.answer || result.content || result.message || '';
         console.log('[AI Analysis] Complete. Length:', analysis.length, 'chars');
         
@@ -602,7 +605,7 @@ Keep response concise, specific, and Toronto-focused. Use plain language for cit
           )}
 
           {/* AI-Powered Context Analysis */}
-          {false && nearbyBuildings.length > 0 && (
+          {nearbyBuildings.length > 0 && (
             <section style={{ marginBottom: "16px" }}>
               <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "8px", color: "#1f2937" }}>
                 🤖 AI Impact Analysis

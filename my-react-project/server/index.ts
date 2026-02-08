@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
+import fetch from 'node-fetch';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -29,8 +30,9 @@ try {
   console.error('⚠️  Failed to load road network:', error);
 }
 
-// Mapbox access token (from environment)
+// API tokens (from environment)
 const MAPBOX_TOKEN = process.env.VITE_MAPBOX_ACCESS_TOKEN || '';
+const BACKBOARD_API_KEY = process.env.VITE_BACKBOARD_API_KEY || '';
 
 /**
  * Proxy tiles from Mapbox
@@ -240,6 +242,51 @@ app.get('/api/roads/stats', (req, res) => {
 });
 
 /**
+ * Proxy for Backboard AI analysis (to avoid CORS)
+ */
+app.post('/api/ai/analyze', async (req, res) => {
+  if (!BACKBOARD_API_KEY) {
+    return res.status(503).json({ error: 'Backboard API key not configured' });
+  }
+
+  const { threadId, query, options } = req.body;
+
+  if (!query || typeof query !== 'string') {
+    return res.status(400).json({ error: 'Query is required' });
+  }
+
+  try {
+    const formData = new URLSearchParams();
+    formData.append('content', query);
+    if (options?.llm_provider) formData.append('llm_provider', options.llm_provider);
+    if (options?.model_name) formData.append('model_name', options.model_name);
+
+    const backboardUrl = `https://app.backboard.io/api/threads/${threadId || 'default'}/messages`;
+    
+    const response = await fetch(backboardUrl, {
+      method: 'POST',
+      headers: {
+        'X-API-Key': BACKBOARD_API_KEY,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString(),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Backboard API error:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Backboard API error', details: errorText });
+    }
+
+    const result = await response.json();
+    res.json(result);
+  } catch (error) {
+    console.error('AI analysis proxy error:', error);
+    res.status(500).json({ error: 'AI analysis failed', message: (error as Error).message });
+  }
+});
+
+/**
  * Find roads near a point
  */
 app.post('/api/roads/nearby', (req, res) => {
@@ -290,6 +337,8 @@ app.listen(PORT, () => {
   console.log(`   - POST /api/buildings/decode - Decode Base64 building data`);
   console.log(`   - GET  /api/roads/stats - Get road network statistics`);
   console.log(`   - POST /api/roads/nearby - Find roads near a point`);
+  console.log(`\n🤖 AI Analysis:`);
+  console.log(`   - POST /api/ai/analyze - AI-powered context analysis (Gemini 2.0 Flash)`);
   console.log(`\n🗺️  Map tiles:`);
   console.log(`   - GET  /tiles/{z}/{x}/{y}.mvt - Mapbox vector tiles proxy\n`);
 });
