@@ -96,8 +96,8 @@ body,
 
 .shape-panel {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  left: 14px;
+  bottom: 70px;
   z-index: 1000;
   width: 280px;
   padding: 12px 14px;
@@ -198,7 +198,7 @@ body,
 .coordinate-display {
   position: absolute;
   bottom: 20px;
-  right: 320px;
+  right: 14px;
   background: rgba(255, 255, 255, 0.95);
   padding: 12px 16px;
   border-radius: 6px;
