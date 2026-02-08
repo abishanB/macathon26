@@ -243,6 +243,9 @@ export function SimulationResultsPanel({
       return;
     }
     
+    // Clear previous AI analysis when location changes
+    setAiAnalysis('');
+    
     async function fetchNearbyBuildingsWithAddresses() {
       try {
         // Use 100 pixel radius for nearby buildings (roughly 100-200m depending on zoom)
@@ -307,7 +310,13 @@ export function SimulationResultsPanel({
 
   // AI Analysis of nearby buildings impact
   useEffect(() => {
+    // Don't run if already analyzing, not visible, or no nearby buildings
     if (!isVisible || isMinimized || nearbyBuildings.length === 0 || isAnalyzing) {
+      return;
+    }
+
+    // Don't re-run if we already have an analysis (only run once per nearby buildings change)
+    if (aiAnalysis) {
       return;
     }
 
@@ -398,7 +407,7 @@ Keep response concise, specific, and Toronto-focused. Use plain language for cit
     }
 
     analyzeNearbyBuildingsImpact();
-  }, [nearbyBuildings, buildingCount, closedRoads, stats.closed, isVisible, isMinimized, isAnalyzing]);
+  }, [nearbyBuildings, buildingCount, closedRoads, stats.closed, isVisible, isMinimized]);
 
   if (!isVisible) return null;
 
