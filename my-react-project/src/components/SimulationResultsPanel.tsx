@@ -363,17 +363,17 @@ Provide a brief, actionable analysis (3-5 sentences max) covering:
 Keep response concise, specific, and Toronto-focused. Use plain language for city planners.`;
 
         // Call backend proxy (avoids CORS issues)
+        // Backend automatically handles thread creation and caching
         const response = await fetch('http://localhost:3001/api/ai/analyze', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            threadId: 'context_analysis_thread',
             query,
             options: {
               llm_provider: 'openrouter',
-              model_name: 'google/gemini-2.0-flash-exp',
+              model_name: 'openai/gpt-4o-mini',
             }
           }),
         });

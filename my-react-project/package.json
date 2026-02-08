@@ -10,7 +10,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:analysis": "tsx scripts/test-analysis.ts"
+    "test:analysis": "tsx scripts/test-analysis.ts",
+    "test:ai": "tsx scripts/test-ai-restaurant-analysis.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.2.6",
@@ -23,6 +24,7 @@
     "@turf/turf": "^7.3.3",
     "cors": "^2.8.6",
     "deck.gl": "^9.2.6",
+    "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "maplibre-gl": "^5.17.0",
     "node-fetch": "^3.3.2",

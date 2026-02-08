@@ -4,12 +4,16 @@ import fetch from 'node-fetch';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { config } from 'dotenv';
 import { addCustomBuilding, getCustomBuildingsAsGeoJSON, clearCustomBuildings, deleteCustomBuilding, getCustomBuildings } from './tile-utils.js';
 import { analyzeBuildingPlacement, analyzeBuildingsBatch, getAnalysisSummary, decodeBuilding } from './analysis.js';
 import type { RoadNetwork } from './analysis.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Load environment variables from .env file
+config({ path: join(__dirname, '../.env') });
 
 const app = express();
 const PORT = 3001;
@@ -32,6 +36,11 @@ try {
 // API tokens (from environment)
 const MAPBOX_TOKEN = process.env.VITE_MAPBOX_ACCESS_TOKEN || '';
 const BACKBOARD_API_KEY = process.env.VITE_BACKBOARD_API_KEY || '';
+
+// Debug: Log API key status (but not the actual key!)
+console.log(`🔑 API Keys Status:`);
+console.log(`   - MAPBOX_TOKEN: ${MAPBOX_TOKEN ? '✅ Set (' + MAPBOX_TOKEN.substring(0, 10) + '...)' : '❌ Missing'}`);
+console.log(`   - BACKBOARD_API_KEY: ${BACKBOARD_API_KEY ? '✅ Set (' + BACKBOARD_API_KEY.substring(0, 10) + '...)' : '❌ Missing'}`);
 
 /**
  * Proxy tiles from Mapbox
@@ -242,25 +251,118 @@ app.get('/api/roads/stats', (req, res) => {
 
 /**
  * Proxy for Backboard AI analysis (to avoid CORS)
+ * Handles thread and assistant creation automatically
  */
+
+// Cache for Backboard assistant and thread
+let cachedAssistant: { assistant_id: string } | null = null;
+let cachedThread: { thread_id: string } | null = null;
+
+async function getOrCreateBackboardThread(): Promise<{ thread_id: string }> {
+  if (cachedThread) {
+    return cachedThread;
+  }
+
+  try {
+    // Step 1: Get or create assistant
+    if (!cachedAssistant) {
+      const assistantsRes = await fetch('https://app.backboard.io/api/assistants', {
+        method: 'GET',
+        headers: { 'X-API-Key': BACKBOARD_API_KEY },
+      });
+
+      if (assistantsRes.ok) {
+        const assistants = await assistantsRes.json();
+        const existing = assistants.find((a: any) => a.name === 'UrbanSim Toronto Context Analysis');
+        
+        if (existing) {
+          cachedAssistant = existing;
+        } else {
+          // Create new assistant
+          const createRes = await fetch('https://app.backboard.io/api/assistants', {
+            method: 'POST',
+            headers: {
+              'X-API-Key': BACKBOARD_API_KEY,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              name: 'UrbanSim Toronto Context Analysis',
+              description: 'Analyzes construction impact based on nearby building context',
+              system_prompt: 'You are an expert on Toronto urban planning and construction impact analysis. Focus on business competition, feasibility concerns, community impact, and opportunities when analyzing new construction near existing buildings.'
+            }),
+          });
+
+          if (createRes.ok) {
+            cachedAssistant = await createRes.json();
+          } else {
+            throw new Error(`Failed to create assistant: ${createRes.status}`);
+          }
+        }
+      }
+    }
+
+    // Step 2: Get or create thread under assistant
+    if (cachedAssistant) {
+      const threadsRes = await fetch(`https://app.backboard.io/api/assistants/${cachedAssistant.assistant_id}/threads`, {
+        method: 'GET',
+        headers: { 'X-API-Key': BACKBOARD_API_KEY },
+      });
+
+      if (threadsRes.ok) {
+        const threads = await threadsRes.json();
+        if (threads.length > 0) {
+          cachedThread = threads[0];
+        } else {
+          // Create new thread
+          const createThreadRes = await fetch(`https://app.backboard.io/api/assistants/${cachedAssistant.assistant_id}/threads`, {
+            method: 'POST',
+            headers: {
+              'X-API-Key': BACKBOARD_API_KEY,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+          });
+
+          if (createThreadRes.ok) {
+            cachedThread = await createThreadRes.json();
+          }
+        }
+      }
+    }
+
+    if (!cachedThread) {
+      throw new Error('Failed to create or retrieve thread');
+    }
+
+    console.log(`✅ Using Backboard thread: ${cachedThread.thread_id}`);
+    return cachedThread;
+  } catch (error) {
+    console.error('Failed to initialize Backboard thread:', error);
+    throw error;
+  }
+}
+
 app.post('/api/ai/analyze', async (req, res) => {
   if (!BACKBOARD_API_KEY) {
     return res.status(503).json({ error: 'Backboard API key not configured' });
   }
 
-  const { threadId, query, options } = req.body;
+  const { query, options } = req.body;
 
   if (!query || typeof query !== 'string') {
     return res.status(400).json({ error: 'Query is required' });
   }
 
   try {
+    // Get or create thread (with caching)
+    const thread = await getOrCreateBackboardThread();
+
     const formData = new URLSearchParams();
     formData.append('content', query);
     if (options?.llm_provider) formData.append('llm_provider', options.llm_provider);
     if (options?.model_name) formData.append('model_name', options.model_name);
 
-    const backboardUrl = `https://app.backboard.io/api/threads/${threadId || 'default'}/messages`;
+    const backboardUrl = `https://app.backboard.io/api/threads/${thread.thread_id}/messages`;
     
     const response = await fetch(backboardUrl, {
       method: 'POST',
@@ -277,7 +379,40 @@ app.post('/api/ai/analyze', async (req, res) => {
       return res.status(response.status).json({ error: 'Backboard API error', details: errorText });
     }
 
-    const result = await response.json();
+    let result = await response.json();
+    const messageId = result.message_id;
+    console.log(`📥 Backboard initial response: ${result.status || 'no status'} (message: ${messageId})`);
+    
+    // Poll for completion if status is IN_PROGRESS
+    if (result.status === 'IN_PROGRESS' && messageId) {
+      const maxAttempts = 15; // 30 seconds max
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+        
+        // Get specific message status
+        const statusRes = await fetch(`https://app.backboard.io/api/threads/${result.thread_id}/messages/${messageId}`, {
+          method: 'GET',
+          headers: { 'X-API-Key': BACKBOARD_API_KEY },
+        });
+        
+        if (statusRes.ok) {
+          const updatedMessage = await statusRes.json();
+          
+          if (updatedMessage.status === 'COMPLETED') {
+            console.log(`✅ Analysis completed after ${(attempt + 1) * 2} seconds`);
+            result = updatedMessage;
+            break;
+          } else if (updatedMessage.status === 'FAILED') {
+            console.log('❌ Analysis failed');
+            result = updatedMessage;
+            break;
+          }
+          console.log(`⏳ Attempt ${attempt + 1}: Still processing...`);
+        }
+      }
+    }
+    
+    // Return the final result (completed or last IN_PROGRESS state)
     res.json(result);
   } catch (error) {
     console.error('AI analysis proxy error:', error);
