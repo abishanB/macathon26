@@ -45,14 +45,14 @@ type FeatureLike = {
   geometry?: GeoJSON.Geometry;
 };
 
-const INITIAL_CENTER: [number, number] = [-79.385, 43.65];
-const INITIAL_ZOOM = 10;
+const INITIAL_CENTER: [number, number] = [-79.385, 45];
+const INITIAL_ZOOM = 12;
 const PITCH = 45;
 const BEARING = -12;
 
 const TORONTO_BOUNDS: [[number, number], [number, number]] = [
-  [-79.48, 43.6],
-  [-79.3, 43.69],
+  [-79.5005, 43.6],
+  [-79.280, 43.7],
 ];
 const MIN_ZOOM = 8;
 const MAX_ZOOM = 14;
