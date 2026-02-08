@@ -1,11 +1,11 @@
-import type { Map, ControlPosition } from "maplibre-gl";
+import type { ControlPosition, IControl, Map } from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 
 /**
  * Custom MapLibre control for Draw Polygon button
  * Positioned on the left side, below navigation controls
  */
-export class DrawPolygonControl {
+export class DrawPolygonControl implements IControl {
   private _container: HTMLDivElement;
   private _button: HTMLButtonElement;
   private _draw: MapboxDraw | null = null;

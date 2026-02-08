@@ -1,4 +1,4 @@
-import type { Map } from "mapbox-gl";
+import type { Map } from "maplibre-gl";
 
 const TILESET_ID = "abishanbhavananthan.d8g5xu8x";
 const SOURCE_ID = "ttc-routes-source";

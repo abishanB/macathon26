@@ -3,7 +3,7 @@
  * Allows users to place, drag, and resize buildings
  */
 
-import mapboxgl from 'mapbox-gl';
+import maplibregl from 'maplibre-gl';
 import type { Building } from '../types/building';
 
 const DEFAULT_BUILDING_HEIGHT = 30; // meters
@@ -16,14 +16,12 @@ export interface BuildingPlacerCallbacks {
 }
 
 export class BuildingPlacer {
-  private map: mapboxgl.Map;
+  private map: maplibregl.Map;
   private buildings: Map<string, Building>;
   private selectedBuilding: Building | null = null;
   private callbacks: BuildingPlacerCallbacks;
-  private isDragging = false;
-  private isResizing = false;
 
-  constructor(map: mapboxgl.Map, callbacks: BuildingPlacerCallbacks) {
+  constructor(map: maplibregl.Map, callbacks: BuildingPlacerCallbacks) {
     this.map = map;
     this.buildings = new Map();
     this.callbacks = callbacks;
@@ -68,14 +66,15 @@ export class BuildingPlacer {
         id: 'placed-buildings-outline',
         type: 'line',
         source: 'placed-buildings',
+        filter: ['==', ['get', 'selected'], true],
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+        },
         paint: {
-          'line-color': [
-            'case',
-            ['==', ['get', 'selected'], true],
-            '#2E5C8A', // Selected: dark blue
-            '#C44545', // Normal: dark red
-          ],
-          'line-width': 2,
+          'line-color': '#ffd166',
+          'line-width': 4,
+          'line-opacity': 1,
         },
       });
     }
@@ -86,7 +85,7 @@ export class BuildingPlacer {
 
   private setupEventHandlers() {
     // Click to place building
-    this.map.on('click', (e) => {
+    this.map.on('click', (e: maplibregl.MapMouseEvent) => {
       const features = this.map.queryRenderedFeatures(e.point, {
         layers: ['placed-buildings-3d'],
       });
@@ -136,7 +135,7 @@ export class BuildingPlacer {
   /**
    * Place a new building at the specified location
    */
-  private placeBuilding(lngLat: mapboxgl.LngLat) {
+  private placeBuilding(lngLat: maplibregl.LngLat) {
     const building: Building = {
       id: `building-${Date.now()}`,
       coordinates: [lngLat.lng, lngLat.lat],
@@ -213,7 +212,7 @@ export class BuildingPlacer {
    * Update the map source with current buildings
    */
   private updateMapSource() {
-    const source = this.map.getSource('placed-buildings') as mapboxgl.GeoJSONSource;
+    const source = this.map.getSource('placed-buildings') as maplibregl.GeoJSONSource;
     if (source) {
       const features = Array.from(this.buildings.values()).map((building) => {
         const size = Math.sqrt(building.footprint);

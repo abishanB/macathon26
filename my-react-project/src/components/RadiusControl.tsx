@@ -1,15 +1,15 @@
 import { useEffect, useState, useRef } from "react";
-import mapboxgl from "mapbox-gl";
+import maplibregl from "maplibre-gl";
 import * as turf from "@turf/turf";
 
 interface RadiusControlProps {
-  map: mapboxgl.Map | null;
+  map: maplibregl.Map | null;
 }
 
 export const RadiusControl = ({ map }: RadiusControlProps) => {
   const [radiusKm, setRadiusKm] = useState<number>(5);
   const [isUpdating, setIsUpdating] = useState(false);
-  const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const updateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Calculate current radius from map bounds
   const calculateCurrentRadius = (): number => {
@@ -44,7 +44,7 @@ export const RadiusControl = ({ map }: RadiusControlProps) => {
     
     // Fit map to bbox
     map.fitBounds(
-      [[bbox[0], bbox[1]], [bbox[2], bbox[3]]] as [mapboxgl.LngLatLike, mapboxgl.LngLatLike],
+      [[bbox[0], bbox[1]], [bbox[2], bbox[3]]] as [maplibregl.LngLatLike, maplibregl.LngLatLike],
       {
         padding: 50,
         duration: 500,

@@ -5,14 +5,14 @@
  * Handles vector encoding/decoding for building coordinates.
  */
 
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 // Environment variables (set in .env)
 // Support both browser (import.meta.env) and Node.js (process.env) contexts
 const getEnvVar = (key: string): string => {
-  if (typeof process !== 'undefined' && process.env) {
-    return process.env[key] || '';
-  }
+  const nodeProcess = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  if (nodeProcess?.env) return nodeProcess.env[key] || '';
   if (typeof import.meta !== 'undefined' && import.meta.env) {
     return (import.meta.env as any)[key] || '';
   }
@@ -26,6 +26,14 @@ const SUPABASE_SERVICE_ROLE_KEY = getEnvVar('VITE_SUPABASE_SERVICE_ROLE_KEY') ||
 // Singleton client instance
 let _client: SupabaseClient | null = null;
 let _adminClient: SupabaseClient | null = null;
+
+type EncodedCoordinates =
+  | number[]
+  | number[][]
+  | number[][][]
+  | GeoJSON.Position[]
+  | GeoJSON.Position[][]
+  | GeoJSON.Position[][][];
 
 /**
  * Get Supabase client (public/anonymous access)
@@ -77,7 +85,7 @@ export const VectorUtils = {
   /**
    * Encode coordinates to Base64-encoded vector string
    */
-  encode(coordinates: number[][] | number[][][]): string {
+  encode(coordinates: EncodedCoordinates): string {
     try {
       const json = JSON.stringify(coordinates);
       const bytes = new TextEncoder().encode(json);
@@ -92,7 +100,7 @@ export const VectorUtils = {
   /**
    * Decode Base64-encoded vector string to coordinates
    */
-  decode(encoded: string): number[][] | number[][][] {
+  decode(encoded: string): EncodedCoordinates {
     try {
       const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
       const json = new TextDecoder().decode(bytes);
@@ -108,7 +116,7 @@ export const VectorUtils = {
    */
   encodeGeometry(geometry: GeoJSON.Geometry): string {
     if (geometry.type === 'Point') {
-      return this.encode([geometry.coordinates as number[]]);
+      return this.encode([geometry.coordinates]);
     } else if (geometry.type === 'Polygon') {
       return this.encode(geometry.coordinates);
     } else if (geometry.type === 'MultiPolygon') {
@@ -120,7 +128,7 @@ export const VectorUtils = {
   /**
    * Decode vector to GeoJSON coordinates
    */
-  decodeToCoordinates(encoded: string): number[][] | number[][][] {
+  decodeToCoordinates(encoded: string): EncodedCoordinates {
     return this.decode(encoded);
   },
 };

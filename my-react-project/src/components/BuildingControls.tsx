@@ -9,14 +9,12 @@ import './BuildingControls.css';
 interface BuildingControlsProps {
   building: Building;
   onUpdate: (updates: Partial<Building>) => void;
-  onDelete: () => void;
   onAnalyze: () => void;
 }
 
 export const BuildingControls: React.FC<BuildingControlsProps> = ({
   building,
   onUpdate,
-  onDelete,
   onAnalyze,
 }) => {
   const handleHeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -36,9 +34,6 @@ export const BuildingControls: React.FC<BuildingControlsProps> = ({
     <div className="building-controls">
       <div className="controls-header">
         <h3>Building Controls</h3>
-        <button className="btn-delete" onClick={onDelete} title="Delete building">
-          🗑️
-        </button>
       </div>
 
       <div className="controls-body">
@@ -104,3 +99,4 @@ export const BuildingControls: React.FC<BuildingControlsProps> = ({
     </div>
   );
 };
+
