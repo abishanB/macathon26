@@ -63,10 +63,20 @@ function getNearbyBuildingsAndPOIs(
   
   const results = new Map<string, NearbyPlace>();
   
-  features.forEach(feature => {
+  features.forEach((feature, idx) => {
     const props = feature.properties || {};
     const id = feature.id || props.osm_id || props.id || Math.random();
     const featureId = String(id);
+    
+    // Debug: log first 3 features to see available properties
+    if (idx < 3) {
+      console.log('[Nearby Buildings Debug] Feature properties:', {
+        layer: feature.layer?.id,
+        name: props.name,
+        allProps: Object.keys(props),
+        sampleProps: props
+      });
+    }
     
     if (results.has(featureId)) return;
     
@@ -87,15 +97,40 @@ function getNearbyBuildingsAndPOIs(
       || props.building
       || 'building';
     
-    // Build address
+    // Build address with multiple fallback strategies
     const addressParts = [
       props['addr:housenumber'],
       props['addr:street']
     ].filter(Boolean);
     
-    const address = addressParts.length > 0
-      ? addressParts.join(' ')
-      : props['addr:city'] || 'Address unavailable';
+    let address = '';
+    if (addressParts.length > 0) {
+      // Has street address
+      address = addressParts.join(' ');
+      if (props['addr:city']) address += ', ' + props['addr:city'];
+    } else if (props.address) {
+      // Fallback to 'address' property (some tilesets use this)
+      address = props.address;
+    } else if (props['addr:full']) {
+      // Some tilesets have full address in one field
+      address = props['addr:full'];
+    } else {
+      // Last resort: show neighborhood or use coordinates
+      const neighborhood = props.neighbourhood || props.suburb || props.district;
+      if (neighborhood) {
+        address = neighborhood + ', Toronto';
+      } else {
+        // Use feature coordinates as last resort
+        const coords = feature.geometry?.type === 'Point' 
+          ? feature.geometry.coordinates 
+          : null;
+        if (coords) {
+          address = `${coords[1].toFixed(4)}°N, ${coords[0].toFixed(4)}°W`;
+        } else {
+          address = 'Toronto';
+        }
+      }
+    }
     
     // Priority scoring (named POIs > named buildings > unnamed)
     let priority = 0;
@@ -189,9 +224,19 @@ export function SimulationResultsPanel({
   const unreachableRate = stats.closed > 0 ? (stats.unreachable / stats.trips) * 100 : 0;
   
   // Estimate average delay in minutes based on closure impact
-  // Assumption: typical trip is ~10 min, each closure adds ~2-3% delay
+  // More realistic urban construction delay model:
+  // - Base scenario: typical urban trip is ~10 min
+  // - Each closure adds ~5-8% delay (not 2.5%) due to cascading congestion
+  // - Higher impact if unreachable routes force major detours
+  // - Urban construction typically causes 3-15 min delays in Toronto
   const baselineTimeMin = 10;
-  const delayMultiplier = stats.closed > 0 ? 1 + (stats.closed * 0.025) : 1;
+  const closureImpactFactor = 0.07; // 7% delay per closed road (conservative urban estimate)
+  const detourPenalty = unreachableRate > 5 ? 1.5 : 1.0; // 50% worse if many routes blocked
+  
+  const delayMultiplier = stats.closed > 0 
+    ? 1 + (stats.closed * closureImpactFactor * detourPenalty) 
+    : 1;
+  
   const estimatedDelayMin = Math.max(0, (baselineTimeMin * delayMultiplier) - baselineTimeMin);
   
   const congestionLevel = unreachableRate > 10 ? "High" : unreachableRate > 5 ? "Medium" : "Low";
