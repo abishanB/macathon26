@@ -1,5 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import type maplibregl from "maplibre-gl";
 import type { SimulationStats } from "../App";
+
+interface NearbyPlace {
+  name: string;
+  address: string;
+  type: string;
+  priority: number;
+}
 
 interface SimulationResultsPanelProps {
   stats: SimulationStats;
@@ -7,6 +15,145 @@ interface SimulationResultsPanelProps {
   onClose: () => void;
   buildingCount?: number;
   closedRoads?: number;
+  map?: maplibregl.Map | null;
+  centerPoint?: [number, number];
+}
+
+/**
+ * Query nearby buildings and POIs within a pixel radius from a center point
+ */
+function getNearbyBuildingsAndPOIs(
+  map: maplibregl.Map,
+  centerPoint: [number, number],
+  radiusPixels: number = 500
+): NearbyPlace[] {
+  const centerPixel = map.project(centerPoint);
+  
+  const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
+    [centerPixel.x - radiusPixels, centerPixel.y - radiusPixels],
+    [centerPixel.x + radiusPixels, centerPixel.y + radiusPixels]
+  ];
+  
+  // Query BOTH building and POI layers
+  const possibleLayers = [
+    'building',
+    'poi-label',
+    'poi',
+    'place-label',
+    'poi_label',
+  ];
+  
+  // Filter to only existing layers
+  const existingLayers = possibleLayers.filter(layerId => {
+    try {
+      return map.getLayer(layerId) !== undefined;
+    } catch {
+      return false;
+    }
+  });
+  
+  if (existingLayers.length === 0) {
+    console.warn('No POI or building layers found');
+    return [];
+  }
+  
+  const features = map.queryRenderedFeatures(bbox, {
+    layers: existingLayers
+  });
+  
+  const results = new Map<string, NearbyPlace>();
+  
+  features.forEach(feature => {
+    const props = feature.properties || {};
+    const id = feature.id || props.osm_id || props.id || Math.random();
+    const featureId = String(id);
+    
+    if (results.has(featureId)) return;
+    
+    // Extract name (prioritize business/brand names)
+    const name = props.name 
+      || props['name:en']
+      || props.brand
+      || props.operator
+      || props.amenity
+      || props.shop
+      || 'Unnamed Building';
+    
+    // Extract type/category
+    const type = props.class
+      || props.type
+      || props.amenity
+      || props.shop
+      || props.building
+      || 'building';
+    
+    // Build address
+    const addressParts = [
+      props['addr:housenumber'],
+      props['addr:street']
+    ].filter(Boolean);
+    
+    const address = addressParts.length > 0
+      ? addressParts.join(' ')
+      : props['addr:city'] || 'Address unavailable';
+    
+    // Priority scoring (named POIs > named buildings > unnamed)
+    let priority = 0;
+    if (props.name || props.brand) priority += 10; // Has a real name
+    if (props.amenity || props.shop) priority += 5; // Is a business/POI
+    if (feature.layer?.id?.includes('poi')) priority += 3; // From POI layer
+    
+    results.set(featureId, {
+      name: name.length > 50 ? name.substring(0, 47) + '...' : name,
+      address,
+      type,
+      priority
+    });
+  });
+  
+  // Sort by priority (named businesses first), then return top 5
+  return Array.from(results.values())
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 5);
+}
+
+/**
+ * Get icon emoji for place type
+ */
+function getTypeIcon(type: string): string {
+  const iconMap: Record<string, string> = {
+    restaurant: '🍽️',
+    food: '🍔',
+    cafe: '☕',
+    bank: '🏦',
+    atm: '💰',
+    hospital: '🏥',
+    pharmacy: '💊',
+    school: '🏫',
+    university: '🎓',
+    library: '📚',
+    hotel: '🏨',
+    shop: '🛍️',
+    supermarket: '🛒',
+    retail: '🏪',
+    office: '🏢',
+    commercial: '🏢',
+    residential: '🏘️',
+    parking: '🅿️',
+    gas_station: '⛽',
+    church: '⛪',
+    mosque: '🕌',
+    place_of_worship: '🛐',
+    park: '🌳',
+    stadium: '🏟️',
+    cinema: '🎬',
+    theatre: '🎭',
+    gym: '💪',
+    police: '👮',
+    fire_station: '🚒',
+  };
+  
+  return iconMap[type] || '🏢';
 }
 
 export function SimulationResultsPanel({
@@ -15,8 +162,26 @@ export function SimulationResultsPanel({
   onClose,
   buildingCount = 0,
   closedRoads = 0,
+  map = null,
+  centerPoint,
 }: SimulationResultsPanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
+  const [nearbyBuildings, setNearbyBuildings] = useState<NearbyPlace[]>([]);
+
+  // Query nearby buildings when panel opens or center changes
+  useEffect(() => {
+    if (!map || !centerPoint || !isVisible || isMinimized) {
+      return;
+    }
+    
+    try {
+      const buildings = getNearbyBuildingsAndPOIs(map, centerPoint, 500);
+      setNearbyBuildings(buildings);
+    } catch (error) {
+      console.error('Failed to query nearby buildings:', error);
+      setNearbyBuildings([]);
+    }
+  }, [map, centerPoint, isVisible, isMinimized]);
 
   if (!isVisible) return null;
 
@@ -159,6 +324,54 @@ export function SimulationResultsPanel({
                 <div style={{ marginBottom: "6px" }}>
                   <strong>Road Segments Closed:</strong> {closedRoads}
                 </div>
+              </div>
+            </section>
+          )}
+
+          {/* Nearby Buildings & POIs */}
+          {nearbyBuildings.length > 0 && (
+            <section style={{ marginBottom: "16px" }}>
+              <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "8px", color: "#1f2937" }}>
+                📍 Nearby Buildings
+              </h3>
+              <div style={{ fontSize: "12px", color: "#374151" }}>
+                {nearbyBuildings.map((building, index) => (
+                  <div 
+                    key={`${building.name}-${index}`}
+                    style={{ 
+                      marginBottom: "8px", 
+                      padding: "8px", 
+                      background: "#f9fafb", 
+                      borderRadius: "4px",
+                      borderLeft: "3px solid #3b82f6"
+                    }}
+                  >
+                    <div style={{ 
+                      fontWeight: "600", 
+                      color: "#111827",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      marginBottom: "3px"
+                    }}>
+                      <span>{getTypeIcon(building.type)}</span>
+                      <span>{building.name}</span>
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#6b7280", marginTop: "3px" }}>
+                      {building.address}
+                    </div>
+                    {building.type !== 'building' && (
+                      <div style={{ 
+                        fontSize: "10px", 
+                        color: "#9ca3af", 
+                        marginTop: "2px",
+                        textTransform: "capitalize"
+                      }}>
+                        {building.type.replace(/_/g, ' ')}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             </section>
           )}

@@ -1936,6 +1936,8 @@ export default function App() {
         onClose={() => setShowResultsPanel(false)}
         buildingCount={polygonBuildings.size}
         closedRoads={stats.closed}
+        map={mapRef.current}
+        centerPoint={mapRef.current?.getCenter().toArray() as [number, number] | undefined}
       />
 
       {cursorCoordinates && (
