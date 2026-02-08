@@ -12,6 +12,6 @@ export function initMap(container: HTMLDivElement): maplibregl.Map {
     bearing: -12,
   });
 
-  map.addControl(new maplibregl.NavigationControl(), "top-right");
+
   return map;
 }

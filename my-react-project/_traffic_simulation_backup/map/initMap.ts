@@ -14,7 +14,5 @@ export function initMap(container: HTMLDivElement, token: string): mapboxgl.Map 
     bearing: -12,
     antialias: true,
   });
-
-  map.addControl(new mapboxgl.NavigationControl(), "top-right");
   return map;
 }

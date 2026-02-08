@@ -10,7 +10,6 @@ export function attachDraw(map: maplibregl.Map) {
     controls: { polygon: true, trash: true }
   });
 
-  map.addControl(draw, 'top-left');
 
   const updateFromDraw = () => {
     const data = draw.getAll();

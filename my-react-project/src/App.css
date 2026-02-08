@@ -181,6 +181,10 @@ body,
   background: #b9112f;
 }
 
+.flow-live {
+  background: #0284c7;
+}
+
 .coordinate-display {
   position: absolute;
   bottom: 20px;
