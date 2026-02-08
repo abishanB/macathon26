@@ -292,6 +292,77 @@
   background: #555;
 }
 
+/* Network Delta Grid */
+
+.network-delta-grid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.delta-card {
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.delta-card.delta-after {
+  background: #fff3e0;
+  border: 1px solid #ffb74d;
+}
+
+.delta-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #666;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.delta-stat {
+  font-size: 13px;
+  color: #444;
+  margin-bottom: 4px;
+}
+
+.delta-change {
+  color: #e65100;
+  font-size: 12px;
+}
+
+.delta-arrow {
+  font-size: 24px;
+  color: #888;
+  text-align: center;
+}
+
+.roads-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.roads-table th {
+  background: #f0f0f0;
+  padding: 8px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: #555;
+}
+
+.roads-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #f0f0f0;
+  color: #444;
+}
+
+.roads-table tr:last-child td {
+  border-bottom: none;
+}
+
 /* Responsive Design */
 
 @media (max-width: 768px) {

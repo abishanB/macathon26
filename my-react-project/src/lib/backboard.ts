@@ -248,8 +248,35 @@ Example format:
       dustControl: boolean;
       noiseControl: boolean;
       expectedOccupancy: number;
+      networkContext?: import('../traffic/buildingContext').NetworkContext;
     }
   ) {
+    // Build live traffic network section if context is available
+    const nc = constructionDetails.networkContext;
+    const networkSection = nc
+      ? `
+LIVE TRAFFIC NETWORK CONTEXT (from real road graph):
+- Nearest road node: ${nc.nearestNodeDistanceM}m away
+- Roads within 400m: ${nc.nearbyRoads.length}
+${nc.nearbyRoads.slice(0, 8).map(r =>
+  `  • ${r.name} (${r.highway}): ${r.distanceM}m away, vol=${r.volume} veh/hr, V/C=${r.vcRatio}, delay×${r.delayFactor}`
+).join('\n')}
+${nc.footprintRoads.length > 0 ? `- Roads INSIDE footprint: ${nc.footprintRoads.length} (direct construction impact)` : ''}
+${nc.suggestedClosures.length > 0 ? `- Roads flagged for closure: ${nc.suggestedClosures.length}` : ''}
+
+PRE-CONSTRUCTION TRAFFIC SUMMARY:
+- Avg delay factor: ${nc.baseline.avgDelayFactor}× (1.0 = free-flow)
+- Max delay factor: ${nc.baseline.maxDelayFactor}×
+- Total volume: ${nc.baseline.totalVolume} veh/hr
+- Network capacity used: ${nc.baseline.networkCapacityPct}%
+
+ESTIMATED POST-CONSTRUCTION SUMMARY (with closures applied):
+- Avg delay factor: ${nc.estimated.avgDelayFactor}× (Δ${(nc.estimated.avgDelayFactor - nc.baseline.avgDelayFactor).toFixed(2)})
+- Max delay factor: ${nc.estimated.maxDelayFactor}× (Δ${(nc.estimated.maxDelayFactor - nc.baseline.maxDelayFactor).toFixed(2)})
+- Total volume: ${nc.estimated.totalVolume} veh/hr
+- Network capacity used: ${nc.estimated.networkCapacityPct}% (Δ${nc.estimated.networkCapacityPct - nc.baseline.networkCapacityPct}%)`
+      : '';
+
     const query = `Analyze the impact of this proposed building construction in Toronto:
 
 LOCATION: ${constructionDetails.location[1].toFixed(4)}, ${constructionDetails.location[0].toFixed(4)}
@@ -275,7 +302,7 @@ TRAFFIC IMPACT:
 ENVIRONMENTAL CONTROLS:
 - Dust control measures: ${constructionDetails.dustControl ? 'Yes' : 'No'}
 - Noise control measures: ${constructionDetails.noiseControl ? 'Yes' : 'No'}
-
+${networkSection}
 Provide a COMPREHENSIVE analysis in JSON format:
 {
   "trafficImpact": {
@@ -339,7 +366,10 @@ Focus on:
 
 Provide specific, quantitative estimates where possible, and cite relevant Toronto regulations.`;
 
-    const result = await this.addMessage(threadId, query);
+    const result = await this.addMessage(threadId, query, {
+      llm_provider: 'openrouter',
+      model_name: 'google/gemini-2.5-pro',
+    });
     const answer = result.answer || result.content || result.message || '';
 
     // Try to parse JSON from the answer

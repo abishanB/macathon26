@@ -1,8 +1,8 @@
-import type { Map } from "mapbox-gl";
+import type { Map, ControlPosition } from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 
 /**
- * Custom Mapbox control for Draw Polygon button
+ * Custom MapLibre control for Draw Polygon button
  * Positioned on the left side, below navigation controls
  */
 export class DrawPolygonControl {
@@ -78,7 +78,7 @@ export class DrawPolygonControl {
     this._container.parentNode?.removeChild(this._container);
   }
 
-  getDefaultPosition(): string {
+  getDefaultPosition(): ControlPosition {
     return "top-left";
   }
 

@@ -75,6 +75,75 @@ export const ImpactReportModal: React.FC<ImpactReportModalProps> = ({
             <p className="narrative">{analysis.narrative}</p>
           </section>
 
+          {/* Live Network Context */}
+          {analysis.networkContext && (
+            <section className="report-section">
+              <h3>🗺 Live Traffic Network</h3>
+              <div className="impact-details">
+                <div className="detail-row">
+                  <span className="detail-label">Nearest Road Node:</span>
+                  <span className="detail-value">{analysis.networkContext.nearestNodeDistanceM}m away</span>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Roads Within 400m:</span>
+                  <span className="detail-value">{analysis.networkContext.nearbyRoads.length}</span>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Roads in Footprint:</span>
+                  <span className="detail-value">{analysis.networkContext.footprintRoads.length}</span>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Roads Flagged for Closure:</span>
+                  <span className="detail-value">{analysis.networkContext.suggestedClosures.length}</span>
+                </div>
+              </div>
+
+              <div className="network-delta-grid">
+                <div className="delta-card">
+                  <div className="delta-label">Before Construction</div>
+                  <div className="delta-stat">Avg Delay: <strong>{analysis.networkContext.baseline.avgDelayFactor}×</strong></div>
+                  <div className="delta-stat">Max Delay: <strong>{analysis.networkContext.baseline.maxDelayFactor}×</strong></div>
+                  <div className="delta-stat">Capacity Used: <strong>{analysis.networkContext.baseline.networkCapacityPct}%</strong></div>
+                </div>
+                <div className="delta-arrow">→</div>
+                <div className="delta-card delta-after">
+                  <div className="delta-label">After Closures</div>
+                  <div className="delta-stat">Avg Delay: <strong>{analysis.networkContext.estimated.avgDelayFactor}×</strong>
+                    <span className="delta-change"> (+{(analysis.networkContext.estimated.avgDelayFactor - analysis.networkContext.baseline.avgDelayFactor).toFixed(2)})</span>
+                  </div>
+                  <div className="delta-stat">Max Delay: <strong>{analysis.networkContext.estimated.maxDelayFactor}×</strong>
+                    <span className="delta-change"> (+{(analysis.networkContext.estimated.maxDelayFactor - analysis.networkContext.baseline.maxDelayFactor).toFixed(2)})</span>
+                  </div>
+                  <div className="delta-stat">Capacity Used: <strong>{analysis.networkContext.estimated.networkCapacityPct}%</strong>
+                    <span className="delta-change"> (+{analysis.networkContext.estimated.networkCapacityPct - analysis.networkContext.baseline.networkCapacityPct}%)</span>
+                  </div>
+                </div>
+              </div>
+
+              {analysis.networkContext.nearbyRoads.length > 0 && (
+                <div className="subsection">
+                  <p className="subsection-title">Nearby Roads (closest first)</p>
+                  <table className="roads-table">
+                    <thead>
+                      <tr><th>Road</th><th>Type</th><th>Dist</th><th>V/C</th><th>Delay×</th></tr>
+                    </thead>
+                    <tbody>
+                      {analysis.networkContext.nearbyRoads.slice(0, 6).map((road) => (
+                        <tr key={road.featureIndex}>
+                          <td>{road.name}</td>
+                          <td>{road.highway}</td>
+                          <td>{road.distanceM}m</td>
+                          <td>{road.vcRatio}</td>
+                          <td>{road.delayFactor}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
+
           {/* Traffic Impact */}
           <section className="report-section">
             <h3>🚗 Traffic Impact</h3>

@@ -2,6 +2,9 @@
  * Building and construction impact types
  */
 
+// Re-export the network context type so UI components can import from one place
+export type { NetworkContext, NearbyRoad, TrafficSummary } from "../traffic/buildingContext";
+
 export interface Building {
   id: string;
   coordinates: [number, number]; // [lng, lat]
@@ -110,6 +113,7 @@ export interface ImpactAnalysis {
   // Overall assessment
   overall: {
     riskLevel: 'low' | 'medium' | 'high' | 'critical';
+    severity: number; // 1-10
     recommendedActions: string[];
     estimatedTotalImpact: string;
   };
@@ -122,6 +126,9 @@ export interface ImpactAnalysis {
 
   // AI-generated analysis
   narrative: string;
+
+  // Live traffic graph context (populated before sending to RAG)
+  networkContext?: import("../traffic/buildingContext").NetworkContext;
 }
 
 export interface BuildingFormData {

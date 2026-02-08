@@ -16,8 +16,9 @@ import {
   generateReachabilityProbe,
   getClosedFeatureNodeIds,
 } from "./traffic/model";
-import type { Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
+import type { FeatureMetric, Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
 import { applyMetricsToRoads } from "./traffic/updateGeo";
+import { extractBuildingContext } from "./traffic/buildingContext";
 import { BuildingPlacer } from "./map/buildingPlacer";
 import { BuildingControls } from "./components/BuildingControls";
 import { BuildingInfoModal } from "./components/BuildingInfoModal";
@@ -198,6 +199,7 @@ export default function App() {
   const sampleSignatureRef = useRef("");
   const closureSeedNodeCountRef = useRef(0);
   const closedFeaturesRef = useRef<Set<number>>(new Set<number>());
+  const featureMetricsRef = useRef<Map<number, FeatureMetric>>(new Map());
   const recomputeTimerRef = useRef<number | null>(null);
   const buildingPlacerRef = useRef<BuildingPlacer | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
@@ -340,6 +342,7 @@ export default function App() {
 
     const start = performance.now();
     const result = assignTraffic(graph, closedFeaturesRef.current, odPairsRef.current, 2);
+    featureMetricsRef.current = result.featureMetrics;
     const unreachableTrips = countDisconnectedTrips(
       graph,
       closedFeaturesRef.current,
@@ -863,6 +866,32 @@ export default function App() {
     setStatusText("Analyzing construction impact...");
 
     try {
+      // ── Extract spatial + traffic context for this building ─────────────────
+      const graph = graphRef.current;
+      const roads = roadsRef.current;
+      let networkContext: import("./traffic/buildingContext").NetworkContext | undefined;
+
+      if (graph && roads) {
+        const footprintM2 = formData.footprintWidth * formData.footprintLength;
+        networkContext = extractBuildingContext(
+          selectedBuilding.coordinates,
+          footprintM2,
+          graph,
+          featureMetricsRef.current,
+          roads,
+          400,
+          formData.laneClosures,
+        );
+
+        // Apply suggested road closures to the live traffic simulation
+        for (const fi of networkContext.suggestedClosures) {
+          closedFeaturesRef.current.add(fi);
+        }
+        if (networkContext.suggestedClosures.length > 0) {
+          scheduleSimulation(0);
+        }
+      }
+
       const client = getBackboardClient();
       const assistant = await client.getOrCreateImprovedAssistant();
       const thread = await client.createThreadForAssistant(assistant.assistant_id);
@@ -886,6 +915,7 @@ export default function App() {
         dustControl: formData.dustControl,
         noiseControl: formData.noiseControl,
         expectedOccupancy: formData.expectedOccupancy,
+        networkContext,
       });
 
       // Convert the analysis to ImpactAnalysis type
@@ -934,6 +964,7 @@ export default function App() {
         },
         sources: analysis.sources || [],
         narrative: analysis.narrative || 'Analysis completed.',
+        networkContext,
       };
 
       setImpactAnalysis(impactAnalysis);
@@ -945,7 +976,7 @@ export default function App() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [selectedBuilding]);
+  }, [selectedBuilding, scheduleSimulation]);
 
   return (
     <div className="app-shell">
