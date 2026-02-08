@@ -668,7 +668,7 @@ export default function App() {
           setRectFirstCorner(null);
         }
       });
-      map.addControl(drawControl, "top-left");
+    
       drawControlRef.current = drawControl;
 
       // Handle polygon draw events - convert to 3D buildings
