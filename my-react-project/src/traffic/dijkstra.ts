@@ -1,4 +1,4 @@
-import type { Graph } from "./types";
+import type { Edge, Graph } from "./types";
 
 interface HeapItem {
   nodeId: string;
@@ -141,4 +141,114 @@ export function dijkstraPath(
   }
   path.reverse();
   return path;
+}
+
+export interface DestinationTree {
+  destinationNode: string;
+  distances: Map<string, number>;
+  nextEdgeByNode: Map<string, string>;
+}
+
+export function buildReverseAdjacency(graph: Graph): Map<string, Edge[]> {
+  const reverseAdj = new Map<string, Edge[]>();
+  for (const nodeId of graph.nodes.keys()) {
+    reverseAdj.set(nodeId, []);
+  }
+  for (const edge of graph.edges) {
+    const incoming = reverseAdj.get(edge.to);
+    if (incoming) {
+      incoming.push(edge);
+    } else {
+      reverseAdj.set(edge.to, [edge]);
+    }
+  }
+  return reverseAdj;
+}
+
+export function dijkstraTreeToDestination(
+  graph: Graph,
+  destinationNode: string,
+  edgeTimes: Map<string, number>,
+  reverseAdjacency?: Map<string, Edge[]>,
+): DestinationTree {
+  const reverseAdj = reverseAdjacency ?? buildReverseAdjacency(graph);
+  const distances = new Map<string, number>();
+  const nextEdgeByNode = new Map<string, string>();
+  const heap = new MinHeap();
+
+  distances.set(destinationNode, 0);
+  heap.push({ nodeId: destinationNode, distance: 0 });
+
+  while (heap.size > 0) {
+    const current = heap.pop();
+    if (!current) {
+      break;
+    }
+    const bestDistance = distances.get(current.nodeId);
+    if (bestDistance === undefined || current.distance > bestDistance) {
+      continue;
+    }
+
+    const incomingEdges = reverseAdj.get(current.nodeId) ?? [];
+    for (const edge of incomingEdges) {
+      const edgeTime = edgeTimes.get(edge.id);
+      if (edgeTime === undefined || !Number.isFinite(edgeTime)) {
+        continue;
+      }
+
+      const candidateDistance = current.distance + edgeTime;
+      const existingDistance = distances.get(edge.from);
+      if (existingDistance !== undefined && candidateDistance >= existingDistance) {
+        continue;
+      }
+
+      distances.set(edge.from, candidateDistance);
+      nextEdgeByNode.set(edge.from, edge.id);
+      heap.push({ nodeId: edge.from, distance: candidateDistance });
+    }
+  }
+
+  return {
+    destinationNode,
+    distances,
+    nextEdgeByNode,
+  };
+}
+
+export function reconstructPathFromTree(
+  graph: Graph,
+  originNode: string,
+  destinationNode: string,
+  tree: DestinationTree,
+): string[] {
+  if (originNode === destinationNode) {
+    return [];
+  }
+  if (tree.destinationNode !== destinationNode) {
+    return [];
+  }
+
+  const path: string[] = [];
+  let currentNode = originNode;
+  const maxHops = graph.nodes.size + 1;
+
+  for (let hop = 0; hop < maxHops; hop += 1) {
+    if (currentNode === destinationNode) {
+      return path;
+    }
+
+    const edgeId = tree.nextEdgeByNode.get(currentNode);
+    if (!edgeId) {
+      return [];
+    }
+
+    path.push(edgeId);
+    const edge = graph.edgesById.get(edgeId);
+    if (!edge) {
+      return [];
+    }
+    currentNode = edge.to;
+  }
+
+  return [];
 }

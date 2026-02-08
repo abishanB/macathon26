@@ -1,4 +1,8 @@
-import { dijkstraPath } from "./dijkstra";
+import {
+  buildReverseAdjacency,
+  dijkstraTreeToDestination,
+  reconstructPathFromTree,
+} from "./dijkstra";
 import type { AssignmentResult, Graph, ODPair } from "./types";
 
 const KMH_TO_MPS = 1000 / 3600;
@@ -409,6 +413,19 @@ function initializeEdgeVolume(graph: Graph): Map<string, number> {
   return edgeVolume;
 }
 
+function groupODByDestination(odPairs: ODPair[]): Map<string, ODPair[]> {
+  const grouped = new Map<string, ODPair[]>();
+  for (const od of odPairs) {
+    const bucket = grouped.get(od.destNode);
+    if (bucket) {
+      bucket.push(od);
+    } else {
+      grouped.set(od.destNode, [od]);
+    }
+  }
+  return grouped;
+}
+
 export function assignTraffic(
   graph: Graph,
   closedFeatures: ReadonlySet<number>,
@@ -417,22 +434,43 @@ export function assignTraffic(
 ): AssignmentResult {
   let edgeVolume = initializeEdgeVolume(graph);
   let unreachableTrips = 0;
+  const odByDestination = groupODByDestination(odPairs);
+  const reverseAdjacency = buildReverseAdjacency(graph);
 
   for (let iter = 0; iter < Math.max(1, iterations); iter += 1) {
     const edgeTimes = computeEdgeTimes(graph, edgeVolume, closedFeatures);
     const nextVolume = initializeEdgeVolume(graph);
     unreachableTrips = 0;
 
-    for (const od of odPairs) {
-      const pathEdgeIds = dijkstraPath(graph, od.originNode, od.destNode, edgeTimes);
-      if (pathEdgeIds.length === 0) {
-        unreachableTrips += 1;
-        continue;
-      }
-      for (const edgeId of pathEdgeIds) {
-        nextVolume.set(edgeId, (nextVolume.get(edgeId) ?? 0) + 1);
+    for (const [destinationNode, destinationODPairs] of odByDestination) {
+      const tree = dijkstraTreeToDestination(
+        graph,
+        destinationNode,
+        edgeTimes,
+        reverseAdjacency,
+      );
+
+      for (const od of destinationODPairs) {
+        if (od.originNode === od.destNode) {
+          continue;
+        }
+
+        const pathEdgeIds = reconstructPathFromTree(
+          graph,
+          od.originNode,
+          od.destNode,
+          tree,
+        );
+        if (pathEdgeIds.length === 0) {
+          unreachableTrips += 1;
+          continue;
+        }
+        for (const edgeId of pathEdgeIds) {
+          nextVolume.set(edgeId, (nextVolume.get(edgeId) ?? 0) + 1);
+        }
       }
     }
+
     edgeVolume = nextVolume;
   }
 

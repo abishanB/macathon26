@@ -58,6 +58,7 @@ const TORONTO_BOUNDS: [[number, number], [number, number]] = [
 ];
 const MIN_ZOOM = 9;
 const MAX_ZOOM = 18;
+const FALLBACK_STYLE_URL = "https://demotiles.maplibre.org/style.json";
 
 const DEFAULT_STATS: SimulationStats = {
   nodes: 0,
@@ -204,13 +205,13 @@ export default function App() {
   const buildingPlacerRef = useRef<BuildingPlacer | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
 
-  const [mapStyle, setMapStyle] = useState<MapboxStyle | null>(null);
+  const [mapStyle, setMapStyle] = useState<MapboxStyle | string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [cursorCoordinates, setCursorCoordinates] = useState<{ lng: number; lat: number } | null>(
     null,
   );
   const [statusText, setStatusText] = useState(
-    hasToken ? "Waiting for map..." : "Missing VITE_MAPBOX_TOKEN in .env.",
+    hasToken ? "Waiting for map..." : "No Mapbox token found. Loading fallback map style...",
   );
   const [isComputing, setIsComputing] = useState(false);
   const [stats, setStats] = useState<SimulationStats>(DEFAULT_STATS);
@@ -443,6 +444,7 @@ export default function App() {
 
   useEffect(() => {
     if (!hasToken || !token) {
+      setMapStyle(FALLBACK_STYLE_URL);
       return;
     }
 
@@ -450,7 +452,8 @@ export default function App() {
       .then((style) => setMapStyle(style))
       .catch((error) => {
         const message = error instanceof Error ? error.message : "Unknown style load error";
-        setStatusText(`Style load failed: ${message}`);
+        setStatusText(`Mapbox style failed (${message}). Using fallback style.`);
+        setMapStyle(FALLBACK_STYLE_URL);
       });
   }, [hasToken, token]);
 
@@ -466,7 +469,7 @@ export default function App() {
 
     const map = new maplibregl.Map({
       container,
-      style: mapStyle as unknown as maplibregl.StyleSpecification,
+      style: mapStyle as maplibregl.StyleSpecification | string,
       center: INITIAL_CENTER,
       zoom: INITIAL_ZOOM,
       pitch: PITCH,
