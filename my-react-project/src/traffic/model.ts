@@ -399,7 +399,9 @@ export function computeEdgeTimes(
     const volume = edgeVolume.get(edge.id) ?? 0;
     const capacity = edge.capacity <= 0 ? 1 : edge.capacity;
     const vcRatio = volume / capacity;
-    const travelTime = edge.t0 * (1 + 0.15 * vcRatio ** 4);
+    // BPR function with higher alpha for urban congestion visibility
+    // Standard: 1 + 0.15*(v/c)^4, Urban: 1 + 0.6*(v/c)^4
+    const travelTime = edge.t0 * (1 + 0.6 * vcRatio ** 4);
     edgeTimes.set(edge.id, travelTime);
   }
   return edgeTimes;
