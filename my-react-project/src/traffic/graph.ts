@@ -76,6 +76,167 @@ function registerEdge(edge: Edge, graph: Pick<Graph, "edges" | "edgesById" | "ad
   }
 }
 
+function buildUndirectedNeighborMap(graph: Graph): Map<string, Set<string>> {
+  const neighbors = new Map<string, Set<string>>();
+  for (const nodeId of graph.nodes.keys()) {
+    neighbors.set(nodeId, new Set<string>());
+  }
+  for (const edge of graph.edges) {
+    neighbors.get(edge.from)?.add(edge.to);
+    neighbors.get(edge.to)?.add(edge.from);
+  }
+  return neighbors;
+}
+
+function computeComponents(graph: Graph): string[][] {
+  const neighbors = buildUndirectedNeighborMap(graph);
+  const visited = new Set<string>();
+  const components: string[][] = [];
+
+  for (const nodeId of graph.nodes.keys()) {
+    if (visited.has(nodeId)) {
+      continue;
+    }
+
+    const stack = [nodeId];
+    const component: string[] = [];
+    visited.add(nodeId);
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current) {
+        continue;
+      }
+      component.push(current);
+      for (const next of neighbors.get(current) ?? []) {
+        if (visited.has(next)) {
+          continue;
+        }
+        visited.add(next);
+        stack.push(next);
+      }
+    }
+
+    components.push(component);
+  }
+
+  components.sort((a, b) => b.length - a.length);
+  return components;
+}
+
+function findNearestNodePair(
+  graph: Graph,
+  fromNodes: string[],
+  toNodes: Set<string>,
+): { fromNodeId: string; toNodeId: string; distanceM: number } | null {
+  let bestFrom = "";
+  let bestTo = "";
+  let bestDistanceM = Number.POSITIVE_INFINITY;
+
+  for (const fromNodeId of fromNodes) {
+    const fromNode = graph.nodes.get(fromNodeId);
+    if (!fromNode) {
+      continue;
+    }
+    for (const toNodeId of toNodes) {
+      const toNode = graph.nodes.get(toNodeId);
+      if (!toNode) {
+        continue;
+      }
+      const distanceM = haversineDistanceMeters(fromNode.coord, toNode.coord);
+      if (distanceM < bestDistanceM) {
+        bestDistanceM = distanceM;
+        bestFrom = fromNodeId;
+        bestTo = toNodeId;
+      }
+    }
+  }
+
+  if (!bestFrom || !bestTo || !Number.isFinite(bestDistanceM)) {
+    return null;
+  }
+
+  return {
+    fromNodeId: bestFrom,
+    toNodeId: bestTo,
+    distanceM: bestDistanceM,
+  };
+}
+
+function connectAllComponents(graph: Graph): void {
+  const components = computeComponents(graph);
+  if (components.length <= 1) {
+    return;
+  }
+
+  const connectorHighway = "connector";
+  const connectorSpeedMps = speedMpsForHighway(connectorHighway);
+  const connectorCapacity = capacityForHighway(connectorHighway);
+
+  const primaryComponentNodes = new Set<string>(components[0]);
+  let connectorIndex = 0;
+
+  for (let idx = 1; idx < components.length; idx += 1) {
+    const componentNodes = components[idx];
+    const nearestPair = findNearestNodePair(graph, componentNodes, primaryComponentNodes);
+    if (!nearestPair) {
+      continue;
+    }
+
+    const fromNode = graph.nodes.get(nearestPair.fromNodeId);
+    const toNode = graph.nodes.get(nearestPair.toNodeId);
+    if (!fromNode || !toNode) {
+      continue;
+    }
+
+    const lengthM = nearestPair.distanceM;
+    if (!Number.isFinite(lengthM) || lengthM <= 0) {
+      continue;
+    }
+
+    const t0 = lengthM / Math.max(1, connectorSpeedMps);
+    const forwardId = `connector_${connectorIndex}_a`;
+    const backwardId = `connector_${connectorIndex}_b`;
+    connectorIndex += 1;
+
+    registerEdge(
+      {
+        id: forwardId,
+        from: nearestPair.fromNodeId,
+        to: nearestPair.toNodeId,
+        coords: [fromNode.coord, toNode.coord],
+        lengthM,
+        highway: connectorHighway,
+        speedMps: connectorSpeedMps,
+        t0,
+        capacity: connectorCapacity,
+        featureIndex: -1,
+      },
+      graph,
+    );
+
+    registerEdge(
+      {
+        id: backwardId,
+        from: nearestPair.toNodeId,
+        to: nearestPair.fromNodeId,
+        coords: [toNode.coord, fromNode.coord],
+        lengthM,
+        highway: connectorHighway,
+        speedMps: connectorSpeedMps,
+        t0,
+        capacity: connectorCapacity,
+        featureIndex: -1,
+      },
+      graph,
+    );
+
+    for (const nodeId of componentNodes) {
+      primaryComponentNodes.add(nodeId);
+    }
+  }
+}
+
 export function buildGraphFromGeoJSON(
   roads: GeoJSON.FeatureCollection<GeoJSON.LineString, RoadFeatureProperties>,
 ): Graph {
@@ -107,59 +268,68 @@ export function buildGraphFromGeoJSON(
       maxLat = Math.max(maxLat, lat);
     }
 
-    const start = coords[0];
-    const end = coords[coords.length - 1];
-    const fromNode = ensureNode(start, nodes, adj);
-    const toNode = ensureNode(end, nodes, adj);
-    if (fromNode === toNode) {
-      return;
-    }
-
     const highway = normalizeHighwayValue(feature.properties?.highway);
     const speedMps = speedMpsForHighway(highway);
-    const lengthM = lineLengthMeters(coords);
-    if (!Number.isFinite(lengthM) || lengthM <= 1) {
-      return;
+    const capacity = capacityForHighway(highway);
+    const featureEdgeIds: string[] = [];
+
+    for (let idx = 1; idx < coords.length; idx += 1) {
+      const start = coords[idx - 1];
+      const end = coords[idx];
+      const fromNode = ensureNode(start, nodes, adj);
+      const toNode = ensureNode(end, nodes, adj);
+      if (fromNode === toNode) {
+        continue;
+      }
+
+      const segmentCoords: LngLat[] = [start, end];
+      const lengthM = lineLengthMeters(segmentCoords);
+      if (!Number.isFinite(lengthM) || lengthM <= 1) {
+        continue;
+      }
+
+      const t0 = lengthM / Math.max(1, speedMps);
+      const forwardEdgeId = `${featureIndex}_${idx}_a`;
+      const backwardEdgeId = `${featureIndex}_${idx}_b`;
+
+      registerEdge(
+        {
+          id: forwardEdgeId,
+          from: fromNode,
+          to: toNode,
+          coords: segmentCoords,
+          lengthM,
+          highway,
+          speedMps,
+          t0,
+          capacity,
+          featureIndex,
+        },
+        { edges, edgesById, adj },
+      );
+
+      registerEdge(
+        {
+          id: backwardEdgeId,
+          from: toNode,
+          to: fromNode,
+          coords: [end, start],
+          lengthM,
+          highway,
+          speedMps,
+          t0,
+          capacity,
+          featureIndex,
+        },
+        { edges, edgesById, adj },
+      );
+
+      featureEdgeIds.push(forwardEdgeId, backwardEdgeId);
     }
 
-    const t0 = lengthM / Math.max(1, speedMps);
-    const capacity = capacityForHighway(highway);
-    const forwardEdgeId = `${featureIndex}_a`;
-    const backwardEdgeId = `${featureIndex}_b`;
-
-    registerEdge(
-      {
-        id: forwardEdgeId,
-        from: fromNode,
-        to: toNode,
-        coords,
-        lengthM,
-        highway,
-        speedMps,
-        t0,
-        capacity,
-        featureIndex,
-      },
-      { edges, edgesById, adj },
-    );
-
-    registerEdge(
-      {
-        id: backwardEdgeId,
-        from: toNode,
-        to: fromNode,
-        coords: [...coords].reverse() as LngLat[],
-        lengthM,
-        highway,
-        speedMps,
-        t0,
-        capacity,
-        featureIndex,
-      },
-      { edges, edgesById, adj },
-    );
-
-    featureToEdgeIds.set(featureIndex, [forwardEdgeId, backwardEdgeId]);
+    if (featureEdgeIds.length > 0) {
+      featureToEdgeIds.set(featureIndex, featureEdgeIds);
+    }
   });
 
   const fallbackBbox: [number, number, number, number] = [
@@ -175,7 +345,7 @@ export function buildGraphFromGeoJSON(
     Number.isFinite(maxLng) &&
     Number.isFinite(maxLat);
 
-  return {
+  const graph: Graph = {
     nodes,
     adj,
     edgesById,
@@ -183,4 +353,7 @@ export function buildGraphFromGeoJSON(
     featureToEdgeIds,
     bbox: hasValidBounds ? [minLng, minLat, maxLng, maxLat] : fallbackBbox,
   };
+
+  connectAllComponents(graph);
+  return graph;
 }

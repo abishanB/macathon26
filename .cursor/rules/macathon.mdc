@@ -1,0 +1,198 @@
+---
+name: macathon
+description: Mapbox to MapLibre migration with custom vector tiles
+---
+
+# Mapbox to MapLibre Migration with Custom Vector Tiles
+
+## Overview
+
+This project migrates from Mapbox GL JS to MapLibre GL JS, pulling vector tile data directly from Mapbox's tile API and displaying it immediately in MapLibre. This allows us to use MapLibre's open-source rendering while still leveraging Mapbox's high-quality vector tile data. Later, we'll add the ability to modify tiles with custom roads/streets and serve our own custom vector tile dataset.
+
+## Architecture Overview
+
+### Current State
+- Using `mapbox-gl` for map rendering
+- Using `@mapbox/mapbox-gl-draw` for drawing tools
+- Loading vector tiles from Mapbox hosted service (`mapbox://styles/mapbox/streets-v11`)
+- User can draw polygons with 3D extrusion
+
+### Target State
+- Migrate to `maplibre-gl` (drop-in replacement for mapbox-gl)
+- Pull vector tiles directly from Mapbox tile API and display in MapLibre (no caching/storage)
+- Later: Transform vector tile data to add custom roads/streets
+- Later: Serve custom vector tiles from our own backend or static files
+- Maintain all existing functionality (drawing, 3D buildings, etc.)
+
+## Implementation Strategy
+
+### Phase 1: Migration to MapLibre with Mapbox Tiles
+1. **Replace Mapbox GL JS with MapLibre GL JS**
+   - Install `maplibre-gl` and `maplibre-gl.css`
+   - Replace `mapboxgl` imports with `maplibre-gl`
+   - Update type definitions (MapLibre types are compatible)
+   - Replace `@mapbox/mapbox-gl-draw` with `@maplibre/maplibre-gl-draw` (or compatible alternative)
+
+2. **Configure MapLibre to Use Mapbox Tiles**
+   - Create custom MapLibre style JSON that references Mapbox tile URLs
+   - Mapbox tile URL format: `https://api.mapbox.com/v4/{tileset_id}/{z}/{x}/{y}.mvt?access_token={token}`
+   - For Mapbox styles, use: `https://api.mapbox.com/styles/v1/{username}/{style_id}/tiles/{z}/{x}/{y}?access_token={token}`
+   - Update style JSON to point tile sources to Mapbox API endpoints
+   - Maintain same map configuration (center, zoom, pitch, bearing, bounds)
+
+3. **Direct Tile Fetching**
+   - MapLibre will fetch tiles directly from Mapbox API on-demand
+   - No local caching or storage required initially
+   - Tiles are fetched as user pans/zooms (standard behavior)
+   - Map bounds are restricted to Toronto area to limit tile requests
+
+### Phase 2: Custom Road/Street Addition (Future)
+1. **Vector Tile Modification**
+   - Parse MVT tiles (use `@mapbox/vector-tile` or `@mapbox/mvt`)
+   - Extract road/street layers (typically `road`, `road-label`, `bridge`, etc.)
+   - Add custom road features:
+     - Convert user-drawn polygons to road features
+     - Add custom street geometries
+     - Merge with existing road data
+   - Re-encode modified tiles back to MVT format
+
+2. **Data Sources for Custom Roads**
+   - User-drawn polygons from MapLibre Draw
+   - Imported GeoJSON files
+   - API endpoints for custom road data
+   - Manual editing interface
+
+3. **Tile Generation Pipeline**
+   ```
+   Mapbox Tiles → Extract → Parse MVT → Add Custom Roads → Re-encode MVT → Store
+   ```
+
+### Phase 3: Custom Vector Tile Serving (Future)
+1. **Tile Server Options**
+   - **Option A: Static File Serving**
+     - Pre-generate all tiles
+     - Serve via CDN or static file server
+     - Simple but requires full tile generation upfront
+   
+   - **Option B: Dynamic Tile Server**
+     - Node.js/Express server with tile generation on-demand
+     - Use libraries like `tilelive`, `tileserver-gl`, or custom implementation
+     - More flexible, can merge custom data in real-time
+   
+   - **Option C: MBTiles + Tile Server**
+     - Store tiles in MBTiles SQLite database
+     - Use `tileserver-gl` or similar to serve from MBTiles
+     - Good balance of performance and flexibility
+
+2. **Style JSON Configuration**
+   - Create custom MapLibre style JSON
+   - Reference custom vector tile source
+   - Maintain existing layer styling (3D buildings, user shapes, etc.)
+   - Add styling for custom roads layer
+
+### Phase 4: Integration (Future)
+1. **Update Map Configuration**
+   - Point MapLibre map to custom tile server URL
+   - Use custom style JSON
+   - Ensure all existing features work (drawing, 3D extrusions)
+
+2. **Custom Road Management**
+   - UI for adding/editing custom roads
+   - Save custom roads to database/GeoJSON
+   - Trigger tile regeneration when roads are modified
+   - Preview custom roads before committing
+
+## Technical Stack
+
+### Frontend
+- **MapLibre GL JS**: `maplibre-gl` (replaces `mapbox-gl`)
+- **Drawing Tools**: `@maplibre/maplibre-gl-draw` or compatible library
+- **React**: Existing React + TypeScript setup
+
+### Backend (Future - for custom tiles)
+- **Tile Server**: `tileserver-gl`, `tilelive`, or custom Express server
+- **Vector Tile Processing**: `@mapbox/vector-tile`, `@mapbox/mvt`
+- **Storage**: File system, MBTiles (SQLite), or database
+
+### Tools & Libraries
+- **Current**: MapLibre GL JS, Mapbox tile API (direct fetching)
+- **Future**: MVT Parsing (`@mapbox/vector-tile`), Tile Generation (`tilelive`, `tileserver-gl`), GeoJSON Processing (`@turf/turf`)
+
+## File Structure
+
+```
+my-react-project/
+├── src/
+│   ├── map/
+│   │   ├── draw.ts (update to MapLibre)
+│   │   └── styles/
+│   │       └── mapbox-style.json (MapLibre style JSON pointing to Mapbox tiles)
+│   ├── utils/
+│   │   └── mapbox-tiles.ts (Mapbox tile URL helpers)
+│   └── App.tsx (update to MapLibre)
+│
+└── Future additions (for custom tiles):
+    ├── src/map/tiles/
+    │   ├── processor.ts (MVT parsing & modification)
+    │   └── generator.ts (tile generation)
+    ├── tiles/ (or backend/)
+    │   ├── cache/ (extracted Mapbox tiles)
+    │   ├── custom/ (modified tiles with custom roads)
+    │   └── mbtiles/ (MBTiles databases)
+    └── scripts/
+        └── extract-tiles.ts (tile extraction script)
+```
+
+## Key Considerations
+
+### Legal & Licensing
+- Mapbox Terms of Service: Using Mapbox tiles requires valid access token and compliance with ToS
+- Mapbox tiles are fetched directly from their API (standard usage)
+- Custom roads data should be our own or properly licensed
+- Consider OpenStreetMap data as alternative base layer for future custom tiles
+
+### Performance
+- Browser automatically caches tiles (standard HTTP caching)
+- Map bounds restricted to Toronto area to limit tile requests
+- Tiles loaded on-demand as user pans/zooms (standard MapLibre behavior)
+- Future: Custom tile caching strategy when implementing local tile serving
+
+### Data Management
+- Current: No local storage needed - tiles fetched directly from Mapbox
+- Future: Version control for custom roads, incremental tile updates, backup/restore
+
+### Migration Path
+- Phase 1: Replace Mapbox GL with MapLibre GL, point to Mapbox tile API
+- Phase 2: Test and verify all functionality works
+- Phase 3: Add custom roads/streets capability (future)
+
+## Implementation Order
+
+### Current Phase (Phase 1)
+1. ⬜ Install MapLibre dependencies (`maplibre-gl`, `@maplibre/maplibre-gl-draw`)
+2. ⬜ Replace Mapbox GL with MapLibre GL in components
+3. ⬜ Create MapLibre style JSON that points to Mapbox tile API
+4. ⬜ Update drawing tools to MapLibre-compatible version
+5. ⬜ Test existing functionality with MapLibre (drawing, 3D buildings, bounds)
+6. ⬜ Verify tiles are being fetched from Mapbox API correctly
+
+### Future Phases (Phase 2+)
+7. ⬜ Set up tile extraction/caching pipeline (if needed)
+8. ⬜ Implement MVT parsing and modification
+9. ⬜ Create custom road addition workflow
+10. ⬜ Set up tile server (static or dynamic)
+11. ⬜ Create custom style JSON for custom tiles
+12. ⬜ Integrate custom tiles into map
+13. ⬜ Add UI for managing custom roads
+14. ⬜ Optimize and productionize
+
+## Resources
+
+- [MapLibre GL JS Docs](https://maplibre.org/maplibre-gl-js-docs/)
+- [Mapbox Styles API](https://docs.mapbox.com/api/maps/styles/) - For fetching style JSON
+- [Mapbox Tilesets API](https://docs.mapbox.com/api/maps/vector-tiles/) - For tile URLs
+- [Mapbox Vector Tile Specification](https://github.com/mapbox/vector-tile-spec)
+- [MapLibre Style Specification](https://maplibre.org/maplibre-style-spec/) - Compatible with Mapbox GL style spec
+- [MBTiles Specification](https://github.com/mapbox/mbtiles-spec) - Future use
+- [TileServer GL](https://github.com/maptiler/tileserver-gl) - Future use
+- [OpenMapTiles](https://openmaptiles.org/) - Open source vector tiles alternative

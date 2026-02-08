@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Map, MapboxGeoJSONFeature, MapMouseEvent } from "mapbox-gl";
-import "mapbox-gl/dist/mapbox-gl.css";
-import MapboxGeocoder from "@mapbox/mapbox-gl-geocoder";
-import "@mapbox/mapbox-gl-geocoder/dist/mapbox-gl-geocoder.css";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 import "./App.css";
-import { initMap } from "./map/initMap";
+import { BuildingInput } from "./components/BuildingInput";
+import { attachDraw } from "./map/draw";
 import { DrawPolygonControl } from "./map/DrawPolygonControl";
 import { addRoadLayers, ROAD_LAYER_IDS, updateRoadSourceData } from "./map/layers";
 import { buildGraphFromGeoJSON } from "./traffic/graph";
@@ -13,7 +12,9 @@ import {
   assignTraffic,
   countDisconnectedTrips,
   generateOD,
+  generateODFromOrigins,
   generateReachabilityProbe,
+  getClosedFeatureNodeIds,
 } from "./traffic/model";
 import type { Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
 import { applyMetricsToRoads } from "./traffic/updateGeo";
@@ -24,6 +25,7 @@ import { ImpactReportModal } from "./components/ImpactReportModal";
 import { SimulationResultsPanel } from "./components/SimulationResultsPanel";
 import type { Building, BuildingFormData, ImpactAnalysis } from "./types/building";
 import { getBackboardClient } from "./lib/backboard";
+import { fetchAndConvertMapboxStyle, type MapboxStyle } from "./utils/mapbox-style-converter";
 
 type RoadCollection = GeoJSON.FeatureCollection<GeoJSON.LineString, RoadFeatureProperties>;
 
@@ -33,9 +35,28 @@ export interface SimulationStats {
   trips: number;
   probeTrips: number;
   closed: number;
+  closureSeedNodes: number;
   runtimeMs: number;
   unreachable: number;
 }
+
+type FeatureLike = {
+  id?: string | number;
+  properties?: Record<string, unknown>;
+  geometry?: GeoJSON.Geometry;
+};
+
+const INITIAL_CENTER: [number, number] = [-79.385, 43.65];
+const INITIAL_ZOOM = 12.8;
+const PITCH = 45;
+const BEARING = -12;
+
+const TORONTO_BOUNDS: [[number, number], [number, number]] = [
+  [-79.6, 43.58],
+  [-79.2, 43.85],
+];
+const MIN_ZOOM = 9;
+const MAX_ZOOM = 18;
 
 const DEFAULT_STATS: SimulationStats = {
   nodes: 0,
@@ -43,6 +64,7 @@ const DEFAULT_STATS: SimulationStats = {
   trips: 0,
   probeTrips: 0,
   closed: 0,
+  closureSeedNodes: 0,
   runtimeMs: 0,
   unreachable: 0,
 };
@@ -61,11 +83,9 @@ function parseRoadCollection(raw: unknown): RoadCollection {
     if (!feature.geometry || feature.geometry.type !== "LineString") {
       continue;
     }
-
     const coordinates = feature.geometry.coordinates
       .filter((coord): coord is number[] => Array.isArray(coord) && coord.length >= 2)
       .map((coord) => [Number(coord[0]), Number(coord[1])]);
-
     if (coordinates.length < 2) {
       continue;
     }
@@ -73,21 +93,15 @@ function parseRoadCollection(raw: unknown): RoadCollection {
     features.push({
       type: "Feature",
       id: feature.id,
-      geometry: {
-        type: "LineString",
-        coordinates,
-      },
+      geometry: { type: "LineString", coordinates },
       properties: { ...(feature.properties ?? {}) },
     });
   }
 
-  return {
-    type: "FeatureCollection",
-    features,
-  };
+  return { type: "FeatureCollection", features };
 }
 
-function extractFeatureIndex(feature: MapboxGeoJSONFeature): number | null {
+function extractFeatureIndex(feature: FeatureLike): number | null {
   const fromProperties = feature.properties?.featureIndex;
   if (typeof fromProperties === "number" && Number.isFinite(fromProperties)) {
     return fromProperties;
@@ -98,7 +112,6 @@ function extractFeatureIndex(feature: MapboxGeoJSONFeature): number | null {
       return parsed;
     }
   }
-
   if (typeof feature.id === "number" && Number.isFinite(feature.id)) {
     return feature.id;
   }
@@ -135,8 +148,8 @@ function distance2ToSegment(
 }
 
 function featureDistance2InPixels(
-  map: Map,
-  feature: MapboxGeoJSONFeature,
+  map: maplibregl.Map,
+  feature: FeatureLike,
   px: number,
   py: number,
 ): number {
@@ -171,28 +184,35 @@ function featureDistance2InPixels(
 }
 
 export default function App() {
-  // Support both variable names for compatibility
-  const token = (import.meta.env.VITE_MAPBOX_TOKEN || import.meta.env.VITE_MAPBOX_ACCESS_TOKEN) as string | undefined;
+  const token =
+    (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined) ??
+    (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN as string | undefined);
   const hasToken = typeof token === "string" && token.trim().length > 0;
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<Map | null>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
   const roadsRef = useRef<RoadCollection | null>(null);
   const graphRef = useRef<Graph | null>(null);
   const odPairsRef = useRef<ODPair[]>([]);
   const probePairsRef = useRef<ODPair[]>([]);
+  const sampleSignatureRef = useRef("");
+  const closureSeedNodeCountRef = useRef(0);
   const closedFeaturesRef = useRef<Set<number>>(new Set<number>());
   const recomputeTimerRef = useRef<number | null>(null);
   const buildingPlacerRef = useRef<BuildingPlacer | null>(null);
   const drawControlRef = useRef<DrawPolygonControl | null>(null);
 
+  const [mapStyle, setMapStyle] = useState<MapboxStyle | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [cursorCoordinates, setCursorCoordinates] = useState<{ lng: number; lat: number } | null>(
+    null,
+  );
   const [statusText, setStatusText] = useState(
     hasToken ? "Waiting for map..." : "Missing VITE_MAPBOX_TOKEN in .env.",
   );
   const [isComputing, setIsComputing] = useState(false);
   const [stats, setStats] = useState<SimulationStats>(DEFAULT_STATS);
 
-  // Building placement state
   const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
   const [showBuildingInfo, setShowBuildingInfo] = useState(false);
   const [showImpactReport, setShowImpactReport] = useState(false);
@@ -202,6 +222,91 @@ export default function App() {
   const [drawMode, setDrawMode] = useState(false);
   const [showResultsPanel, setShowResultsPanel] = useState(false);
   const [polygonBuildings, setPolygonBuildings] = useState<Map<string, GeoJSON.Feature>>(new Map());
+
+  const refreshCustomBuildings = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+
+    try {
+      const response = await fetch("http://localhost:3001/api/buildings");
+      if (!response.ok) {
+        return;
+      }
+      const geojson = (await response.json()) as GeoJSON.FeatureCollection<
+        GeoJSON.Polygon,
+        Record<string, unknown>
+      >;
+
+      const sourceId = "custom-buildings";
+      const layerId = "custom-buildings-3d";
+      if (map.getSource(sourceId)) {
+        (map.getSource(sourceId) as maplibregl.GeoJSONSource).setData(geojson);
+        return;
+      }
+
+      const layers = map.getStyle().layers || [];
+      const labelLayerId = layers.find(
+        (layer) => layer.type === "symbol" && layer.layout && layer.layout["text-field"],
+      )?.id;
+
+      map.addSource(sourceId, {
+        type: "geojson",
+        data: geojson,
+      });
+
+      map.addLayer(
+        {
+          id: layerId,
+          type: "fill-extrusion",
+          source: sourceId,
+          paint: {
+            "fill-extrusion-color": "#aaa",
+            "fill-extrusion-height": ["coalesce", ["get", "height"], 20],
+            "fill-extrusion-base": 0,
+            "fill-extrusion-opacity": 0.8,
+          },
+        },
+        labelLayerId,
+      );
+    } catch (error) {
+      console.error("Error refreshing custom buildings:", error);
+    }
+  }, []);
+
+  const buildAdaptiveSamples = useCallback(
+    (graph: Graph, closedFeatures: ReadonlySet<number>): { odPairs: ODPair[]; closureSeedNodes: number } => {
+      const baseTripCount = Math.max(220, Math.min(520, Math.round(graph.edges.length / 25)));
+
+      if (closedFeatures.size === 0) {
+        return {
+          odPairs: generateOD(graph, baseTripCount),
+          closureSeedNodes: 0,
+        };
+      }
+
+      const closureNodeIds = getClosedFeatureNodeIds(graph, closedFeatures);
+      if (closureNodeIds.length === 0) {
+        return {
+          odPairs: generateOD(graph, baseTripCount),
+          closureSeedNodes: 0,
+        };
+      }
+
+      const closureScale = Math.min(1.5, 0.35 + closedFeatures.size * 0.08);
+      const localTripCount = Math.max(120, Math.round(baseTripCount * closureScale));
+
+      return {
+        odPairs: [
+          ...generateOD(graph, baseTripCount),
+          ...generateODFromOrigins(graph, localTripCount, closureNodeIds),
+        ],
+        closureSeedNodes: closureNodeIds.length,
+      };
+    },
+    [],
+  );
 
   const runSimulation = useCallback(() => {
     console.log("🔄 [RECOMPUTE] Starting simulation...");
@@ -221,7 +326,18 @@ export default function App() {
     });
 
     setIsComputing(true);
-    setShowResultsPanel(true); // Show results panel when recomputing
+    setShowResultsPanel(true);
+
+    const sampleSignature = Array.from(closedFeaturesRef.current)
+      .sort((a, b) => a - b)
+      .join(",");
+    if (sampleSignature !== sampleSignatureRef.current) {
+      const adaptiveSamples = buildAdaptiveSamples(graph, closedFeaturesRef.current);
+      odPairsRef.current = adaptiveSamples.odPairs;
+      closureSeedNodeCountRef.current = adaptiveSamples.closureSeedNodes;
+      sampleSignatureRef.current = sampleSignature;
+    }
+
     const start = performance.now();
     const result = assignTraffic(graph, closedFeaturesRef.current, odPairsRef.current, 2);
     const unreachableTrips = countDisconnectedTrips(
@@ -239,6 +355,7 @@ export default function App() {
       trips: odPairsRef.current.length,
       probeTrips: probePairsRef.current.length,
       closed: closedFeaturesRef.current.size,
+      closureSeedNodes: closureSeedNodeCountRef.current,
       runtimeMs,
       unreachable: unreachableTrips,
     };
@@ -253,10 +370,10 @@ export default function App() {
     });
 
     setStatusText(
-      `Heatmap updated in ${runtimeMs} ms (${closedFeaturesRef.current.size} closed segments).`,
+      `Heatmap updated in ${runtimeMs} ms (${odPairsRef.current.length} OD / ${probePairsRef.current.length} fixed probes).`,
     );
     setIsComputing(false);
-  }, []);
+  }, [buildAdaptiveSamples]);
 
   const scheduleSimulation = useCallback(
     (delayMs = 300) => {
@@ -271,50 +388,71 @@ export default function App() {
     [runSimulation],
   );
 
-  const loadRoadNetwork = useCallback(async (map: Map) => {
-    setStatusText("Loading downtown roads...");
-    const response = await fetch("/data/roads_downtown.geojson");
-    if (!response.ok) {
-      throw new Error(`Unable to load roads_downtown.geojson (${response.status})`);
-    }
+  const loadRoadNetwork = useCallback(
+    async (map: maplibregl.Map) => {
+      setStatusText("Loading downtown roads...");
+      const response = await fetch("/data/roads_downtown.geojson");
+      if (!response.ok) {
+        throw new Error(`Unable to load roads_downtown.geojson (${response.status})`);
+      }
 
-    const raw = (await response.json()) as unknown;
-    const roads = parseRoadCollection(raw);
-    roadsRef.current = roads;
+      const raw = (await response.json()) as unknown;
+      const roads = parseRoadCollection(raw);
+      roadsRef.current = roads;
 
-    const graph = buildGraphFromGeoJSON(roads);
-    graphRef.current = graph;
+      const graph = buildGraphFromGeoJSON(roads);
+      graphRef.current = graph;
 
-    const tripCount = Math.max(180, Math.min(320, Math.round(graph.edges.length / 40)));
-    const odPairs = generateOD(graph, tripCount);
-    odPairsRef.current = odPairs;
-    const probeCount = Math.max(800, Math.min(1800, Math.round(graph.nodes.size * 0.25)));
-    const probePairs = generateReachabilityProbe(graph, probeCount);
-    probePairsRef.current = probePairs;
+      const adaptiveSamples = buildAdaptiveSamples(graph, closedFeaturesRef.current);
+      odPairsRef.current = adaptiveSamples.odPairs;
+      const stableProbeCount = Math.max(1200, Math.min(3200, Math.round(graph.nodes.size * 0.35)));
+      probePairsRef.current = generateReachabilityProbe(graph, stableProbeCount);
+      closureSeedNodeCountRef.current = adaptiveSamples.closureSeedNodes;
+      sampleSignatureRef.current = "";
 
-    const start = performance.now();
-    const baseline = assignTraffic(graph, closedFeaturesRef.current, odPairs, 2);
-    const unreachableTrips = countDisconnectedTrips(graph, closedFeaturesRef.current, probePairs);
-    const roadsWithMetrics = applyMetricsToRoads(roads, baseline.featureMetrics);
-    addRoadLayers(map, roadsWithMetrics);
-    const runtimeMs = Math.round(performance.now() - start);
+      const start = performance.now();
+      const baseline = assignTraffic(graph, closedFeaturesRef.current, odPairsRef.current, 2);
+      const unreachableTrips = countDisconnectedTrips(
+        graph,
+        closedFeaturesRef.current,
+        probePairsRef.current,
+      );
+      const roadsWithMetrics = applyMetricsToRoads(roads, baseline.featureMetrics);
+      addRoadLayers(map, roadsWithMetrics);
+      const runtimeMs = Math.round(performance.now() - start);
 
-    setStats({
-      nodes: graph.nodes.size,
-      directedEdges: graph.edges.length,
-      trips: odPairs.length,
-      probeTrips: probePairs.length,
-      closed: 0,
-      runtimeMs,
-      unreachable: unreachableTrips,
-    });
-    setStatusText(
-      `Loaded ${roads.features.length} roads, ${graph.nodes.size} nodes, ${odPairs.length} OD trips.`,
-    );
-  }, []);
+      setStats({
+        nodes: graph.nodes.size,
+        directedEdges: graph.edges.length,
+        trips: odPairsRef.current.length,
+        probeTrips: probePairsRef.current.length,
+        closed: 0,
+        closureSeedNodes: adaptiveSamples.closureSeedNodes,
+        runtimeMs,
+        unreachable: unreachableTrips,
+      });
+      setStatusText(
+        `Loaded ${roads.features.length} roads, ${graph.nodes.size} nodes, ${odPairsRef.current.length} OD trips.`,
+      );
+    },
+    [buildAdaptiveSamples],
+  );
 
   useEffect(() => {
     if (!hasToken || !token) {
+      return;
+    }
+
+    fetchAndConvertMapboxStyle("mapbox://styles/mapbox/streets-v11", token)
+      .then((style) => setMapStyle(style))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Unknown style load error";
+        setStatusText(`Style load failed: ${message}`);
+      });
+  }, [hasToken, token]);
+
+  useEffect(() => {
+    if (!mapStyle) {
       return;
     }
 
@@ -323,13 +461,93 @@ export default function App() {
       return;
     }
 
-    const map = initMap(container, token);
+    const map = new maplibregl.Map({
+      container,
+      style: mapStyle as unknown as maplibregl.StyleSpecification,
+      center: INITIAL_CENTER,
+      zoom: INITIAL_ZOOM,
+      pitch: PITCH,
+      bearing: BEARING,
+      maxBounds: TORONTO_BOUNDS,
+      minZoom: MIN_ZOOM,
+      maxZoom: MAX_ZOOM,
+      antialias: true,
+    });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
     mapRef.current = map;
 
-    const handleLoad = () => {
+    const { detach } = attachDraw(map);
+
+    const ensureUserSourceAndLayer = () => {
+      if (!map.getSource("user-shape")) {
+        map.addSource("user-shape", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+      }
+      if (!map.getLayer("user-shape-extrude")) {
+        map.addLayer({
+          id: "user-shape-extrude",
+          type: "fill-extrusion",
+          source: "user-shape",
+          paint: {
+            "fill-extrusion-color": "#ff7e5f",
+            "fill-extrusion-height": ["coalesce", ["get", "height"], 40],
+            "fill-extrusion-base": 0,
+            "fill-extrusion-opacity": 0.8,
+          },
+        });
+      }
+    };
+
+    const handleStyleLoad = () => {
+      ensureUserSourceAndLayer();
+
+      const layers = map.getStyle().layers || [];
+      const labelLayerId = layers.find(
+        (layer) => layer.type === "symbol" && layer.layout && layer.layout["text-field"],
+      )?.id;
+
+      if (!map.getLayer("add-3d-buildings")) {
+        map.addLayer(
+          {
+            id: "add-3d-buildings",
+            source: "composite",
+            "source-layer": "building",
+            filter: ["==", "extrude", "true"],
+            type: "fill-extrusion",
+            minzoom: 15,
+            paint: {
+              "fill-extrusion-color": "#aaa",
+              "fill-extrusion-height": [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                15,
+                0,
+                15.05,
+                ["get", "height"],
+              ],
+              "fill-extrusion-base": [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                15,
+                0,
+                15.05,
+                ["get", "min_height"],
+              ],
+              "fill-extrusion-opacity": 0.6,
+            },
+          },
+          labelLayerId,
+        );
+      }
+
+      void refreshCustomBuildings();
       void loadRoadNetwork(map).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "Unknown load error";
-        setStatusText(`Load failed: ${message}`);
+        const message = error instanceof Error ? error.message : "Unknown road load error";
+        setStatusText(`Road load failed: ${message}`);
       });
 
       // Initialize building placer
@@ -384,7 +602,7 @@ export default function App() {
             return newMap;
           });
 
-          const source = map.getSource("polygon-buildings") as mapboxgl.GeoJSONSource;
+          const source = map.getSource("polygon-buildings") as maplibregl.GeoJSONSource;
           if (!source) {
             map.addSource("polygon-buildings", {
               type: "geojson",
@@ -455,19 +673,14 @@ export default function App() {
       (map as any)._polygonHandlers = { create: handlePolygonCreate, update: handlePolygonUpdate, delete: handlePolygonDelete };
     };
 
-    const handleMapClick = (event: MapMouseEvent) => {
-      // Building placement is handled directly by BuildingPlacer's internal click handler
-      // We just need to handle road closures here
-
-      // Check if we're clicking on a building (handled by BuildingPlacer)
+    const handleMapClick = (event: maplibregl.MapMouseEvent) => {
       const buildingFeatures = map.queryRenderedFeatures(event.point, {
-        layers: ['placed-buildings-3d'],
+        layers: ["placed-buildings-3d"],
       });
       if (buildingFeatures.length > 0) {
-        return; // Let BuildingPlacer handle this
+        return;
       }
 
-      // Handle road closure clicks
       if (!map.getLayer(ROAD_LAYER_IDS.heat)) {
         return;
       }
@@ -477,10 +690,8 @@ export default function App() {
           [event.point.x - tolerance, event.point.y - tolerance],
           [event.point.x + tolerance, event.point.y + tolerance],
         ],
-        {
-          layers: [ROAD_LAYER_IDS.heat],
-        },
-      );
+        { layers: [ROAD_LAYER_IDS.heat] },
+      ) as unknown as FeatureLike[];
       if (features.length === 0) {
         return;
       }
@@ -514,18 +725,20 @@ export default function App() {
       scheduleSimulation();
     };
 
-    const handleMapMove = (event: MapMouseEvent) => {
-      // Check for building hover
-      const buildingFeatures = map.queryRenderedFeatures(event.point, {
-        layers: ['placed-buildings-3d'],
+    const handleMouseMove = (event: maplibregl.MapMouseEvent) => {
+      setCursorCoordinates({
+        lng: Number(event.lngLat.lng.toFixed(6)),
+        lat: Number(event.lngLat.lat.toFixed(6)),
       });
 
+      const buildingFeatures = map.queryRenderedFeatures(event.point, {
+        layers: ["placed-buildings-3d"],
+      });
       if (buildingFeatures.length > 0) {
         map.getCanvas().style.cursor = "pointer";
         return;
       }
 
-      // Check for road hover
       if (!map.getLayer(ROAD_LAYER_IDS.heat)) {
         map.getCanvas().style.cursor = "";
         return;
@@ -536,100 +749,15 @@ export default function App() {
       map.getCanvas().style.cursor = hovered.length > 0 ? "pointer" : "";
     };
 
-      map.on("load", handleLoad);
-      map.on("click", handleMapClick);
-      map.on("mousemove", handleMapMove);
+    const handleMouseLeave = () => {
+      setCursorCoordinates(null);
+      map.getCanvas().style.cursor = "";
+    };
 
-      // Store draw event handlers for cleanup
-      const draw = drawControl.getDraw();
-      const drawHandlers = {
-        create: (e: any) => {
-          console.log("🏗️ [POLYGON DRAW] Polygon created, converting to 3D building...", e);
-          const feature = e.features[0];
-          if (feature && feature.geometry.type === "Polygon") {
-            const buildingId = feature.id || `polygon-${Date.now()}`;
-            const buildingFeature: GeoJSON.Feature = {
-              ...feature,
-              id: buildingId,
-              properties: {
-                ...feature.properties,
-                height: feature.properties?.height || 40,
-                type: "polygon-building",
-                baseHeight: 0,
-              },
-            };
-
-            setPolygonBuildings((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(String(buildingId), buildingFeature);
-              return newMap;
-            });
-
-            const source = map.getSource("polygon-buildings") as mapboxgl.GeoJSONSource;
-            if (!source) {
-              map.addSource("polygon-buildings", {
-                type: "geojson",
-                data: {
-                  type: "FeatureCollection",
-                  features: [buildingFeature],
-                },
-              });
-
-              map.addLayer({
-                id: "polygon-buildings-3d",
-                type: "fill-extrusion",
-                source: "polygon-buildings",
-                paint: {
-                  "fill-extrusion-color": "#4A90E2",
-                  "fill-extrusion-height": ["get", "height"],
-                  "fill-extrusion-base": ["get", "baseHeight"],
-                  "fill-extrusion-opacity": 0.8,
-                },
-              });
-
-              map.addLayer({
-                id: "polygon-buildings-outline",
-                type: "line",
-                source: "polygon-buildings",
-                paint: {
-                  "line-color": "#2E5C8A",
-                  "line-width": 2,
-                },
-              });
-            } else {
-              const currentData = source._data as GeoJSON.FeatureCollection;
-              source.setData({
-                ...currentData,
-                features: [...currentData.features, buildingFeature],
-              });
-            }
-
-            if (draw) {
-              draw.delete(feature.id);
-            }
-            console.log(`✅ [POLYGON DRAW] Building created with height ${buildingFeature.properties.height}m`);
-          }
-        },
-        update: (e: any) => {
-          console.log("🔄 [POLYGON DRAW] Polygon updated", e);
-        },
-        delete: (e: any) => {
-          console.log("🗑️ [POLYGON DRAW] Polygon deleted", e);
-          e.features.forEach((feature: any) => {
-            setPolygonBuildings((prev) => {
-              const newMap = new Map(prev);
-              newMap.delete(String(feature.id));
-              return newMap;
-            });
-          });
-        },
-      };
-
-      if (draw) {
-        map.on("draw.create", drawHandlers.create);
-        map.on("draw.update", drawHandlers.update);
-        map.on("draw.delete", drawHandlers.delete);
-      }
+    map.on("style.load", handleStyleLoad);
+    map.on("click", handleMapClick);
+    map.on("mousemove", handleMouseMove);
+    map.on("mouseleave", handleMouseLeave);
 
     return () => {
       if (recomputeTimerRef.current !== null) {
@@ -645,14 +773,30 @@ export default function App() {
         }
         map.removeControl(drawControlRef.current);
       }
-      map.off("load", handleLoad);
+      try {
+        detach();
+      } catch {
+        // no-op
+      }
+      map.off("style.load", handleStyleLoad);
       map.off("click", handleMapClick);
-      map.off("mousemove", handleMapMove);
+      map.off("mousemove", handleMouseMove);
+      map.off("mouseleave", handleMouseLeave);
       map.getCanvas().style.cursor = "";
       map.remove();
       mapRef.current = null;
     };
-  }, [hasToken, loadRoadNetwork, scheduleSimulation, token]);
+  }, [loadRoadNetwork, mapStyle, refreshCustomBuildings, scheduleSimulation]);
+
+  useEffect(() => {
+    if (refreshTrigger > 0) {
+      void refreshCustomBuildings();
+    }
+  }, [refreshCustomBuildings, refreshTrigger]);
+
+  const handleBuildingAdded = useCallback(() => {
+    setRefreshTrigger((previous) => previous + 1);
+  }, []);
 
   const handleResetClosures = useCallback(() => {
     console.log("🔄 [RESET CLOSURES] Clearing all road closures...");
@@ -807,6 +951,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <div ref={mapContainerRef} className="map-container" />
+      <BuildingInput onBuildingAdded={handleBuildingAdded} />
 
       <section className="controls">
         <h1>Toronto Reactive Traffic Heatmap</h1>
@@ -835,6 +980,7 @@ export default function App() {
           <div>Trips/sample: {stats.trips}</div>
           <div>Probe trips: {stats.probeTrips}</div>
           <div>Closed roads: {stats.closed}</div>
+          <div>Closure seed nodes: {stats.closureSeedNodes}</div>
           <div>Last run: {stats.runtimeMs} ms</div>
           <div>Unreachable trips: {stats.unreachable}</div>
         </div>
@@ -853,7 +999,6 @@ export default function App() {
         </div>
       </section>
 
-      {/* Building Controls */}
       {selectedBuilding && (
         <BuildingControls
           building={selectedBuilding}
@@ -863,7 +1008,6 @@ export default function App() {
         />
       )}
 
-      {/* Building Info Modal */}
       {showBuildingInfo && selectedBuilding && (
         <BuildingInfoModal
           building={selectedBuilding}
@@ -872,7 +1016,6 @@ export default function App() {
         />
       )}
 
-      {/* Impact Report Modal */}
       {showImpactReport && impactAnalysis && (
         <ImpactReportModal
           analysis={impactAnalysis}
@@ -880,7 +1023,6 @@ export default function App() {
         />
       )}
 
-      {/* Simulation Results Panel */}
       <SimulationResultsPanel
         stats={stats}
         isVisible={showResultsPanel}
@@ -888,6 +1030,17 @@ export default function App() {
         buildingCount={polygonBuildings.size + (selectedBuilding ? 1 : 0)}
         closedRoads={stats.closed}
       />
+
+      {cursorCoordinates && (
+        <div className="coordinate-display">
+          <div className="coordinate-label">Coordinates</div>
+          <div className="coordinate-value">
+            <span className="coord-lng">{cursorCoordinates.lng.toFixed(6)}</span>
+            <span className="coord-separator">, </span>
+            <span className="coord-lat">{cursorCoordinates.lat.toFixed(6)}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
