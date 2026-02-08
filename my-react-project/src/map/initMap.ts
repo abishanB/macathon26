@@ -10,7 +10,9 @@ export function initMap(container: HTMLDivElement): maplibregl.Map {
     zoom: 12.8,
     pitch: 45,
     bearing: -12,
-    antialias: true,
+    canvasContextAttributes: {
+      antialias: true,
+    },
   });
 
 

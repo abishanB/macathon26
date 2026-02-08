@@ -1099,7 +1099,9 @@ export default function App() {
       maxBounds: TORONTO_BOUNDS,
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
-      antialias: true,
+      canvasContextAttributes: {
+        antialias: true,
+      },
     });
    
     mapRef.current = map;
@@ -1223,12 +1225,13 @@ export default function App() {
         const feature = e.features[0];
         if (feature && feature.geometry.type === "Polygon") {
           const buildingId = feature.id || `polygon-${Date.now()}`;
+          const buildingHeight = feature.properties?.height ?? 40;
           const buildingFeature: GeoJSON.Feature = {
             ...feature,
             id: buildingId,
             properties: {
               ...feature.properties,
-              height: feature.properties?.height || 40,
+              height: buildingHeight,
               type: "polygon-building",
               baseHeight: 0,
             },
@@ -1240,7 +1243,7 @@ export default function App() {
           if (draw) {
             draw.delete(feature.id);
           }
-          console.log(`✅ [POLYGON DRAW] Building created with height ${buildingFeature.properties.height}m`);
+          console.log(`✅ [POLYGON DRAW] Building created with height ${buildingHeight}m`);
         }
       };
 
@@ -1499,10 +1502,6 @@ export default function App() {
     });
   }, []);
 
-  const handleToggleDrawMode = useCallback(() => {
-    drawControlRef.current?.toggle();
-  }, []);
-
   const handleShapeModeChange = useCallback((mode: "none" | "rectangle") => {
     setShapeMode(mode);
     rectFirstCornerRef.current = null;
@@ -1522,12 +1521,35 @@ export default function App() {
     }
   }, [selectedBuilding]);
 
-  const handleBuildingDelete = useCallback(() => {
-    if (selectedBuilding) {
+  useEffect(() => {
+    const handleBackspaceDelete = (event: KeyboardEvent) => {
+      if (event.key !== "Backspace" || !selectedBuilding) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const tagName = target.tagName;
+        const isEditableElement =
+          target.isContentEditable ||
+          tagName === "INPUT" ||
+          tagName === "TEXTAREA" ||
+          tagName === "SELECT";
+        if (isEditableElement) {
+          return;
+        }
+      }
+
+      event.preventDefault();
       buildingPlacerRef.current?.deleteBuilding(selectedBuilding.id);
       setSelectedBuilding(null);
       scheduleSimulation(0);
-    }
+    };
+
+    window.addEventListener("keydown", handleBackspaceDelete);
+    return () => {
+      window.removeEventListener("keydown", handleBackspaceDelete);
+    };
   }, [scheduleSimulation, selectedBuilding]);
 
   const handleAnalyzeBuilding = useCallback(() => {
@@ -1611,7 +1633,8 @@ export default function App() {
           riskLevel: (analysis.overall?.riskLevel as any) || 'medium',
           recommendedActions: analysis.overall?.recommendedActions || [],
           estimatedTotalImpact: analysis.overall?.estimatedTotalImpact || '',
-          severity: analysis.overall?.severity || 5,
+          severity:
+            typeof analysis.overall?.severity === "number" ? analysis.overall.severity : 5,
         },
         sources: analysis.sources || [],
         narrative: analysis.narrative || 'Analysis completed.',
@@ -1672,7 +1695,7 @@ export default function App() {
               : 'Rectangle mode: click first corner, then opposite corner.'
             : drawMode
             ? 'Click to draw polygon vertices. Double-click or click first point to complete.'
-            : 'Click a road to toggle closure and reroute traffic. Use the âœï¸ button on the left to draw polygons.'}
+            : 'Click a building to select it (outline shown), then press Backspace to delete. Click roads to toggle closures.'}
         </p>
         <div className="legend">
           <span className="chip flow-good">delay 1.0</span>
@@ -1740,7 +1763,6 @@ export default function App() {
         <BuildingControls
           building={selectedBuilding}
           onUpdate={handleBuildingUpdate}
-          onDelete={handleBuildingDelete}
           onAnalyze={handleAnalyzeBuilding}
         />
       )}

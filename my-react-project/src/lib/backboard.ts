@@ -145,24 +145,9 @@ class BackboardClient {
     pdfPath: string,
     filename: string
   ): Promise<UploadResult> {
-    try {
-      const { readFileSync } = await import('fs');
-      const pdfBuffer = readFileSync(pdfPath);
-      const blob = new Blob([pdfBuffer], { type: 'application/pdf' });
-      const formData = new FormData();
-      formData.append('file', blob, filename);
-
-      const result = await this.requestForm(`/threads/${threadId}/documents`, formData);
-      return {
-        success: true,
-        documentId: result.document_id || result.id || 'unknown',
-        threadId,
-      };
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(`PDF upload failed [${filename}]:`, errMsg);
-      return { success: false, documentId: '', threadId, error: errMsg };
-    }
+    const errMsg = `PDF upload from filesystem path is not supported in this browser build (${pdfPath}).`;
+    console.error(`PDF upload failed [${filename}]:`, errMsg);
+    return { success: false, documentId: '', threadId, error: errMsg };
   }
 
   async listDocuments(threadId: string) {
@@ -509,9 +494,12 @@ let _client: BackboardClient | null = null;
 export function getBackboardClient(): BackboardClient {
   if (_client) return _client;
 
-  const apiKey = typeof process !== 'undefined'
-    ? process.env.BACKBOARD_API_KEY || process.env.BACKBOARD_KEY || ''
-    : (import.meta as any).env?.VITE_BACKBOARD_API_KEY || '';
+  const nodeProcess = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  const apiKey =
+    nodeProcess?.env?.BACKBOARD_API_KEY ||
+    nodeProcess?.env?.BACKBOARD_KEY ||
+    (import.meta as any).env?.VITE_BACKBOARD_API_KEY ||
+    '';
 
   if (!apiKey) {
     throw new Error('Backboard API key not found. Set BACKBOARD_API_KEY in .env');

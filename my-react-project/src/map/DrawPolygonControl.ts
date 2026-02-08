@@ -1,11 +1,11 @@
-import type { Map } from "mapbox-gl";
+import type { ControlPosition, IControl, Map } from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 
 /**
  * Custom Mapbox control for Draw Polygon button
  * Positioned on the left side, below navigation controls
  */
-export class DrawPolygonControl {
+export class DrawPolygonControl implements IControl {
   private _container: HTMLDivElement;
   private _button: HTMLButtonElement;
   private _draw: MapboxDraw | null = null;
@@ -78,7 +78,7 @@ export class DrawPolygonControl {
     this._container.parentNode?.removeChild(this._container);
   }
 
-  getDefaultPosition(): string {
+  getDefaultPosition(): ControlPosition {
     return "top-left";
   }
 

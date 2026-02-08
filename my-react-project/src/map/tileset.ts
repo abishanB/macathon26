@@ -1,8 +1,8 @@
 import { useEffect } from "react";
-import mapboxgl from "mapbox-gl";
+import maplibregl from "maplibre-gl";
 
 interface TtcRoutesProps {
-  map: mapboxgl.Map | null;
+  map: maplibregl.Map | null;
   showRoutes: boolean;
 }
 

@@ -6,7 +6,7 @@
  */
 
 import { getSupabaseClient, VectorUtils } from './supabase';
-import type { Building, ConstructionDetails } from '../types/building';
+import type { ConstructionDetails } from '../types/building';
 
 export interface BuildingRecord {
   id: string;

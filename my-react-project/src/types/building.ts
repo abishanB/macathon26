@@ -110,6 +110,7 @@ export interface ImpactAnalysis {
   // Overall assessment
   overall: {
     riskLevel: 'low' | 'medium' | 'high' | 'critical';
+    severity: number; // 1-10
     recommendedActions: string[];
     estimatedTotalImpact: string;
   };

@@ -79,7 +79,7 @@ export function BuildingInput({ onBuildingAdded }: BuildingInputProps) {
         throw new Error(errorData.error || 'Failed to add building');
       }
 
-      const result = await response.json();
+      await response.json();
       setSuccess(`Building added successfully!`);
       setCoordinates('');
       
