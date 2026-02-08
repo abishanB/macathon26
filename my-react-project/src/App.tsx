@@ -46,16 +46,16 @@ type FeatureLike = {
 };
 
 const INITIAL_CENTER: [number, number] = [-79.385, 43.65];
-const INITIAL_ZOOM = 12.8;
+const INITIAL_ZOOM = 12.5;
 const PITCH = 45;
 const BEARING = -12;
 
 const TORONTO_BOUNDS: [[number, number], [number, number]] = [
-  [-79.6, 43.58],
-  [-79.2, 43.85],
+  [-79.459331, 43],
+  [-79.325, 43.68141],
 ];
-const MIN_ZOOM = 9;
-const MAX_ZOOM = 18;
+const MIN_ZOOM = 8;
+const MAX_ZOOM = 14;
 const FALLBACK_STYLE_URL = "https://demotiles.maplibre.org/style.json";
 
 const DEFAULT_STATS: SimulationStats = {
