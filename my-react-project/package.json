@@ -13,12 +13,16 @@
     "test:analysis": "tsx scripts/test-analysis.ts"
   },
   "dependencies": {
+    "@deck.gl/core": "^9.2.6",
+    "@deck.gl/geo-layers": "^9.2.6",
+    "@deck.gl/layers": "^9.2.6",
     "@mapbox/mapbox-gl-draw": "^1.5.1",
-    "@mapbox/vector-tile": "^2.0.4",
     "@mapbox/mapbox-gl-geocoder": "^5.1.2",
+    "@mapbox/vector-tile": "^2.0.4",
     "@supabase/supabase-js": "^2.95.3",
     "@turf/turf": "^7.3.3",
     "cors": "^2.8.6",
+    "deck.gl": "^9.2.6",
     "express": "^5.2.1",
     "maplibre-gl": "^5.17.0",
     "node-fetch": "^3.3.2",
