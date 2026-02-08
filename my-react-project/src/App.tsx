@@ -65,7 +65,7 @@ const TORONTO_BOUNDS: [[number, number], [number, number]] = [
   [-79.280, 43.7],
 ];
 const MIN_ZOOM = 8;
-const MAX_ZOOM = 14;
+const MAX_ZOOM = 20;
 const FALLBACK_STYLE_URL = "https://demotiles.maplibre.org/style.json";
 const TRAFFIC_PARTICLE_SOURCE_ID = "traffic-particles";
 const TRAFFIC_PARTICLE_LAYER_ID = "traffic-particles";
