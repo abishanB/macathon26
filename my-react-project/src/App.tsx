@@ -137,9 +137,9 @@ const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
     id: "restaurant",
     label: "Restaurant",
     modelUrl: new URL("../3d_models/Dining car.glb", import.meta.url).href,
-    referenceWidthM: 70,
-    referenceDepthM: 70,
-    referenceHeightM: 70,
+    referenceWidthM: 80,
+    referenceDepthM: 80,
+    referenceHeightM: 80,
     ...DEFAULT_MODEL_RENDER_PARAMS,
   },
   {
@@ -550,6 +550,34 @@ function rectangleCoordinates(
   ]];
 }
 
+function rectangleCoordinatesScreenAligned(
+  map: maplibregl.Map,
+  start: [number, number],
+  end: [number, number],
+): GeoJSON.Position[][] {
+  const startPx = map.project(start);
+  const endPx = map.project(end);
+  const minX = Math.min(startPx.x, endPx.x);
+  const maxX = Math.max(startPx.x, endPx.x);
+  const minY = Math.min(startPx.y, endPx.y);
+  const maxY = Math.max(startPx.y, endPx.y);
+
+  const corners = [
+    [minX, minY],
+    [maxX, minY],
+    [maxX, maxY],
+    [minX, maxY],
+    [minX, minY],
+  ] as const;
+
+  return [
+    corners.map(([x, y]) => {
+      const lngLat = map.unproject([x, y]);
+      return [lngLat.lng, lngLat.lat] as GeoJSON.Position;
+    }),
+  ];
+}
+
 function createRectangleFeature(
   id: string,
   start: [number, number],
@@ -561,13 +589,14 @@ function createRectangleFeature(
   scaleHeight: number,
   rotationDeg: number,
   selected = false,
+  coordinatesOverride?: GeoJSON.Position[][],
 ): GeoJSON.Feature<GeoJSON.Polygon> {
   return {
     type: "Feature",
     id,
     geometry: {
       type: "Polygon",
-      coordinates: rectangleCoordinates(start, end),
+      coordinates: coordinatesOverride ?? rectangleCoordinates(start, end),
     },
     properties: {
       id,
@@ -584,10 +613,16 @@ function createRectangleFeature(
   };
 }
 
-function rectangleAreaTooSmall(start: [number, number], end: [number, number]): boolean {
-  const deltaLng = Math.abs(start[0] - end[0]);
-  const deltaLat = Math.abs(start[1] - end[1]);
-  return deltaLng < 0.00001 || deltaLat < 0.00001;
+function rectangleAreaTooSmallScreen(
+  map: maplibregl.Map,
+  start: [number, number],
+  end: [number, number],
+): boolean {
+  const startPx = map.project(start);
+  const endPx = map.project(end);
+  const deltaX = Math.abs(startPx.x - endPx.x);
+  const deltaY = Math.abs(startPx.y - endPx.y);
+  return deltaX < 4 || deltaY < 4;
 }
 
 function emptyTrafficPointCollection(): GeoJSON.FeatureCollection<
@@ -1339,6 +1374,7 @@ export default function App() {
       if (!source) {
         return;
       }
+      const rectangleCoords = rectangleCoordinatesScreenAligned(map, start, end);
       source.setData({
         type: "FeatureCollection",
         features: [
@@ -1353,6 +1389,7 @@ export default function App() {
             scalePercentToFactor(modelHeightScaleRef.current),
             rotationDegreesFromString(modelRotationDegRef.current),
             false,
+            rectangleCoords,
           ),
         ],
       });
@@ -2128,7 +2165,7 @@ export default function App() {
       }
 
       const dragEnd: [number, number] = [event.lngLat.lng, event.lngLat.lat];
-      if (rectangleAreaTooSmall(dragStart, dragEnd)) {
+      if (rectangleAreaTooSmallScreen(map, dragStart, dragEnd)) {
         setStatusText("Building not added. Drag a larger rectangle.");
         return;
       }
@@ -2136,6 +2173,7 @@ export default function App() {
       const scaleHeight = scalePercentToFactor(modelHeightScaleRef.current);
       const heightValue = Math.max(1, BASE_BUILDING_HEIGHT_M * scaleHeight);
       const buildingId = `rect-${Date.now()}`;
+      const rectangleCoords = rectangleCoordinatesScreenAligned(map, dragStart, dragEnd);
       const buildingFeature = createRectangleFeature(
         buildingId,
         dragStart,
@@ -2147,6 +2185,7 @@ export default function App() {
         scaleHeight,
         rotationDegreesFromString(modelRotationDegRef.current),
         true,
+        rectangleCoords,
       );
       addPolygonBuilding(map, buildingFeature);
       scheduleSimulation(0);
@@ -2623,13 +2662,6 @@ export default function App() {
               ? "Polygon draw mode active."
               : "Free move mode: click roads to toggle closures and click buildings to select."}
         </p>
-        <div className="legend">
-          <span className="chip flow-good">delay 1.0</span>
-          <span className="chip flow-mid">delay 1.3+</span>
-          <span className="chip flow-high">delay 1.8+</span>
-          <span className="chip flow-closed">closed</span>
-          <span className="chip flow-live">live flow</span>
-        </div>
       </section>
 
       <section className="shape-panel">
