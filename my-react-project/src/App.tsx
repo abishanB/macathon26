@@ -46,13 +46,13 @@ type FeatureLike = {
 };
 
 const INITIAL_CENTER: [number, number] = [-79.385, 43.65];
-const INITIAL_ZOOM = 12.5;
+const INITIAL_ZOOM = 10;
 const PITCH = 45;
 const BEARING = -12;
 
 const TORONTO_BOUNDS: [[number, number], [number, number]] = [
-  [-79.459331, 43],
-  [-79.325, 43.68141],
+  [-79.48, 43.6],
+  [-79.3, 43.69],
 ];
 const MIN_ZOOM = 8;
 const MAX_ZOOM = 14;
