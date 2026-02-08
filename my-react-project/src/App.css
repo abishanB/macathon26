@@ -97,7 +97,7 @@ body,
 .shape-panel {
   position: absolute;
   left: 14px;
-  bottom: 70px;
+  bottom: 14px;
   z-index: 1000;
   width: 280px;
   padding: 12px 14px;
