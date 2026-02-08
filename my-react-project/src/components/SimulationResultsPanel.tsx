@@ -29,11 +29,13 @@ function getNearbyBuildingsAndPOIs(
   radiusPixels: number = 500
 ): NearbyPlace[] {
   const centerPixel = map.project(centerPoint);
+  const zoom = map.getZoom();
   
   console.log('[Nearby Buildings Query] ===== START =====');
   console.log('[Nearby Buildings Query] Center point (construction site):', centerPoint);
   console.log('[Nearby Buildings Query] Center pixel:', { x: centerPixel.x, y: centerPixel.y });
-  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels (very tight - immediate vicinity only)');
+  console.log('[Nearby Buildings Query] Map zoom level:', zoom);
+  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels');
   
   const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
     [centerPixel.x - radiusPixels, centerPixel.y - radiusPixels],
@@ -233,13 +235,20 @@ export function SimulationResultsPanel({
   // Query nearby buildings when panel opens or center changes
   useEffect(() => {
     if (!map || !centerPoint || !isVisible || isMinimized) {
+      console.log('[Nearby Buildings] Skipping query:', { 
+        hasMap: !!map, 
+        hasCenterPoint: !!centerPoint, 
+        isVisible, 
+        isMinimized 
+      });
       return;
     }
     
     async function fetchNearbyBuildingsWithAddresses() {
       try {
-        // Use very small radius (10 pixels) for immediate vicinity only
-        const buildings = getNearbyBuildingsAndPOIs(map!, centerPoint!, 10);
+        // Use 100 pixel radius for nearby buildings (roughly 100-200m depending on zoom)
+        console.log('[Nearby Buildings] Starting query at:', centerPoint, 'with 100px radius');
+        const buildings = getNearbyBuildingsAndPOIs(map!, centerPoint!, 100);
         
         // Geocode each building to get real address
         const token = import.meta.env.VITE_MAPBOX_TOKEN || import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
@@ -282,12 +291,14 @@ export function SimulationResultsPanel({
             })
           );
           
+          console.log('[Nearby Buildings] Final results with addresses:', withAddresses.length, 'buildings');
           setNearbyBuildings(withAddresses);
         } else {
+          console.log('[Nearby Buildings] Final results (no geocoding):', buildings.length, 'buildings');
           setNearbyBuildings(buildings);
         }
       } catch (error) {
-        console.error('Failed to query nearby buildings:', error);
+        console.error('[Nearby Buildings] Failed to query:', error);
         setNearbyBuildings([]);
       }
     }

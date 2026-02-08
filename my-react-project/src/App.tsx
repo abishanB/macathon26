@@ -1732,7 +1732,7 @@ export default function App() {
     mapRef.current = map;
     const deckOverlay: any = null; // MapboxOverlay disabled - missing @deck.gl/mapbox package
     deckOverlayRef.current = deckOverlay;
-    map.addControl(deckOverlay);
+    // map.addControl(deckOverlay); // Disabled - deck.gl not configured
 
     const { detach } = attachDraw(map);
 
