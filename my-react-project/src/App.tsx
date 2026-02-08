@@ -646,7 +646,7 @@ export default function App() {
           if (draw) {
             draw.delete(feature.id);
           }
-          console.log(`✅ [POLYGON DRAW] Building created with height ${buildingFeature.properties.height}m`);
+          console.log(`✅ [POLYGON DRAW] Building created with height ${buildingFeature.properties?.height || 40}m`);
         }
       };
 
