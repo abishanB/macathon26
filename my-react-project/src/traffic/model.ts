@@ -11,6 +11,7 @@ const SPEED_BY_HIGHWAY_KMH: Record<string, number> = {
   tertiary: 40,
   residential: 30,
   service: 20,
+  connector: 15,
   road: 35,
 };
 
@@ -22,6 +23,7 @@ const CAPACITY_BY_HIGHWAY: Record<string, number> = {
   tertiary: 900,
   residential: 500,
   service: 300,
+  connector: 80,
   road: 700,
 };
 
@@ -123,6 +125,41 @@ function buildDestinationCandidates(graph: Graph): Array<{ nodeId: string; weigh
   return Array.from(deduped.entries()).map(([nodeId, weight]) => ({ nodeId, weight }));
 }
 
+function sanitizeOriginNodes(graph: Graph, originNodeIds: ReadonlyArray<string>): string[] {
+  const unique = new Set<string>();
+  for (const nodeId of originNodeIds) {
+    if (graph.nodes.has(nodeId)) {
+      unique.add(nodeId);
+    }
+  }
+  return Array.from(unique.values());
+}
+
+export function getClosedFeatureNodeIds(
+  graph: Graph,
+  closedFeatures: ReadonlySet<number>,
+): string[] {
+  if (closedFeatures.size === 0) {
+    return [];
+  }
+  const nodeIds = new Set<string>();
+  for (const featureIndex of closedFeatures) {
+    const edgeIds = graph.featureToEdgeIds.get(featureIndex);
+    if (!edgeIds) {
+      continue;
+    }
+    for (const edgeId of edgeIds) {
+      const edge = graph.edgesById.get(edgeId);
+      if (!edge) {
+        continue;
+      }
+      nodeIds.add(edge.from);
+      nodeIds.add(edge.to);
+    }
+  }
+  return Array.from(nodeIds.values());
+}
+
 export function generateOD(graph: Graph, tripCount: number): ODPair[] {
   const nodes = Array.from(graph.nodes.values());
   if (nodes.length === 0 || tripCount <= 0) {
@@ -167,6 +204,38 @@ export function generateOD(graph: Graph, tripCount: number): ODPair[] {
   return odPairs;
 }
 
+export function generateODFromOrigins(
+  graph: Graph,
+  tripCount: number,
+  originNodeIds: ReadonlyArray<string>,
+): ODPair[] {
+  const origins = sanitizeOriginNodes(graph, originNodeIds);
+  if (origins.length === 0) {
+    return generateOD(graph, tripCount);
+  }
+
+  const destinationCandidates = buildDestinationCandidates(graph);
+  if (destinationCandidates.length === 0 || tripCount <= 0) {
+    return [];
+  }
+
+  const odPairs: ODPair[] = [];
+  let attempts = 0;
+  const maxAttempts = tripCount * 6;
+
+  while (odPairs.length < tripCount && attempts < maxAttempts) {
+    attempts += 1;
+    const originNode = origins[Math.floor(Math.random() * origins.length)];
+    const destNode = weightedChoice(destinationCandidates);
+    if (originNode === destNode) {
+      continue;
+    }
+    odPairs.push({ originNode, destNode });
+  }
+
+  return odPairs;
+}
+
 export function generateReachabilityProbe(graph: Graph, probeCount: number): ODPair[] {
   const nodes = Array.from(graph.nodes.values());
   if (nodes.length === 0 || probeCount <= 0) {
@@ -190,6 +259,48 @@ export function generateReachabilityProbe(graph: Graph, probeCount: number): ODP
       destNode = weightedChoiceFromUnit(destinationCandidates, deterministicUnit(seed + 17));
     }
     seed += 1;
+    if (destNode === originNode) {
+      continue;
+    }
+    probePairs.push({ originNode, destNode });
+  }
+
+  return probePairs;
+}
+
+export function generateReachabilityProbeFromOrigins(
+  graph: Graph,
+  probeCount: number,
+  originNodeIds: ReadonlyArray<string>,
+): ODPair[] {
+  const origins = sanitizeOriginNodes(graph, originNodeIds);
+  if (origins.length === 0) {
+    return generateReachabilityProbe(graph, probeCount);
+  }
+
+  const destinationCandidates = buildDestinationCandidates(graph);
+  if (destinationCandidates.length === 0 || probeCount <= 0) {
+    return [];
+  }
+
+  const targetCount = Math.max(1, probeCount);
+  const probePairs: ODPair[] = [];
+  let seed = 101;
+  let originIndex = 0;
+  let attempts = 0;
+  const maxAttempts = targetCount * 4;
+
+  while (probePairs.length < targetCount && attempts < maxAttempts) {
+    attempts += 1;
+    const originNode = origins[originIndex % origins.length];
+    originIndex += 1;
+
+    let destNode = weightedChoiceFromUnit(destinationCandidates, deterministicUnit(seed));
+    if (destNode === originNode && destinationCandidates.length > 1) {
+      destNode = weightedChoiceFromUnit(destinationCandidates, deterministicUnit(seed + 19));
+    }
+    seed += 1;
+
     if (destNode === originNode) {
       continue;
     }

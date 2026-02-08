@@ -1,4 +1,4 @@
-import type { Expression, GeoJSONSource, Map } from "mapbox-gl";
+import type { GeoJSONSource, Map } from "maplibre-gl";
 import type { RoadFeatureProperties } from "../traffic/types";
 
 export const ROAD_SOURCE_ID = "roads";
@@ -11,7 +11,7 @@ export const ROAD_LAYER_IDS = {
   closures: "closures",
 } as const;
 
-const DELAY_COLOR_EXPRESSION: Expression = [
+const DELAY_COLOR_EXPRESSION: unknown[] = [
   "interpolate",
   ["linear"],
   ["coalesce", ["get", "delayFactor"], 1],
@@ -25,7 +25,7 @@ const DELAY_COLOR_EXPRESSION: Expression = [
   "#e6194b",
 ];
 
-const BASE_LINE_WIDTH_EXPRESSION: Expression = [
+const BASE_LINE_WIDTH_EXPRESSION: unknown[] = [
   "interpolate",
   ["linear"],
   ["zoom"],
@@ -35,7 +35,7 @@ const BASE_LINE_WIDTH_EXPRESSION: Expression = [
   3.0,
 ];
 
-const HEAT_LINE_WIDTH_EXPRESSION: Expression = [
+const HEAT_LINE_WIDTH_EXPRESSION: unknown[] = [
   "interpolate",
   ["linear"],
   ["zoom"],
