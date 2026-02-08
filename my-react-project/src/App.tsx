@@ -25,7 +25,7 @@ import {
   detectRoadClosuresFromBuildingRings,
   extractPolygonRings,
 } from "./traffic/buildingClosures";
-import type { EdgeMetric, FeatureMetric, Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
+import type { Edge, EdgeMetric, FeatureMetric, Graph, ODPair, RoadFeatureProperties } from "./traffic/types";
 import { applyMetricsToRoads } from "./traffic/updateGeo";
 import { SimulationResultsPanel } from "./components/SimulationResultsPanel";
 import { fetchAndConvertMapboxStyle, type MapboxStyle } from "./utils/mapbox-style-converter";
@@ -87,10 +87,22 @@ const MAX_ZOOM = 20;
 const FALLBACK_STYLE_URL = "https://demotiles.maplibre.org/style.json";
 const TRAFFIC_PARTICLE_SOURCE_ID = "traffic-particles";
 const TRAFFIC_PARTICLE_LAYER_ID = "traffic-particles";
-const TRAFFIC_PARTICLE_MAX_COUNT = 420;
+const TRAFFIC_PARTICLE_MAX_COUNT = 1400;
 const TRAFFIC_ROUTE_POOL_MAX = 1600;
-const TRAFFIC_PARTICLE_FRAME_MS = 90;
-const TRAFFIC_PARTICLE_SPEED_SCALE = 1.25;
+const TRAFFIC_PARTICLE_FRAME_MS = 70;
+const TRAFFIC_PARTICLE_SPEED_SCALE = 2.35;
+const TRAFFIC_FOLLOW_MIN_GAP_M = 4;
+const TRAFFIC_FOLLOW_TIME_HEADWAY_SEC = 0.42;
+const TRAFFIC_INTERSECTION_HEADWAY_SEC = 0.62;
+const TRAFFIC_INTERSECTION_HOLD_BACK_M = 1.8;
+const TRAFFIC_INTERSECTION_SLOW_ZONE_M = 26;
+const TRAFFIC_INTERSECTION_SLOW_FACTOR = 0.24;
+const TRAFFIC_SIGNAL_BASE_CYCLE_SEC = 38;
+const TRAFFIC_SIGNAL_CYCLE_VARIANCE_SEC = 14;
+const TRAFFIC_SIGNAL_GREEN_RATIO = 0.52;
+const TRAFFIC_MAX_ACCEL_MPS2 = 8.5;
+const TRAFFIC_MAX_BRAKE_MPS2 = 13;
+const TRAFFIC_INTERSECTION_STOP_EPS_M = 0.06;
 const POLYGON_BUILDINGS_SOURCE_ID = "polygon-buildings";
 const POLYGON_BUILDINGS_LAYER_ID = "polygon-buildings-3d";
 const POLYGON_BUILDINGS_OUTLINE_LAYER_ID = "polygon-buildings-outline";
@@ -123,9 +135,9 @@ const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
     id: "restaurant",
     label: "Restaurant",
     modelUrl: new URL("../3d_models/Dining car.glb", import.meta.url).href,
-    referenceWidthM: 70,
-    referenceDepthM: 70,
-    referenceHeightM: 70,
+    referenceWidthM: 80,
+    referenceDepthM: 80,
+    referenceHeightM: 80,
     ...DEFAULT_MODEL_RENDER_PARAMS,
   },
   {
@@ -297,6 +309,9 @@ type TrafficParticle = {
   edgeIndex: number;
   edgeProgressM: number;
   position: [number, number];
+  speedFactor: number;
+  headwayFactor: number;
+  currentSpeedMps: number;
 };
 
 function asFeatureCollection(
@@ -533,6 +548,34 @@ function rectangleCoordinates(
   ]];
 }
 
+function rectangleCoordinatesScreenAligned(
+  map: maplibregl.Map,
+  start: [number, number],
+  end: [number, number],
+): GeoJSON.Position[][] {
+  const startPx = map.project(start);
+  const endPx = map.project(end);
+  const minX = Math.min(startPx.x, endPx.x);
+  const maxX = Math.max(startPx.x, endPx.x);
+  const minY = Math.min(startPx.y, endPx.y);
+  const maxY = Math.max(startPx.y, endPx.y);
+
+  const corners = [
+    [minX, minY],
+    [maxX, minY],
+    [maxX, maxY],
+    [minX, maxY],
+    [minX, minY],
+  ] as const;
+
+  return [
+    corners.map(([x, y]) => {
+      const lngLat = map.unproject([x, y]);
+      return [lngLat.lng, lngLat.lat] as GeoJSON.Position;
+    }),
+  ];
+}
+
 function createRectangleFeature(
   id: string,
   start: [number, number],
@@ -544,13 +587,14 @@ function createRectangleFeature(
   scaleHeight: number,
   rotationDeg: number,
   selected = false,
+  coordinatesOverride?: GeoJSON.Position[][],
 ): GeoJSON.Feature<GeoJSON.Polygon> {
   return {
     type: "Feature",
     id,
     geometry: {
       type: "Polygon",
-      coordinates: rectangleCoordinates(start, end),
+      coordinates: coordinatesOverride ?? rectangleCoordinates(start, end),
     },
     properties: {
       id,
@@ -567,10 +611,16 @@ function createRectangleFeature(
   };
 }
 
-function rectangleAreaTooSmall(start: [number, number], end: [number, number]): boolean {
-  const deltaLng = Math.abs(start[0] - end[0]);
-  const deltaLat = Math.abs(start[1] - end[1]);
-  return deltaLng < 0.00001 || deltaLat < 0.00001;
+function rectangleAreaTooSmallScreen(
+  map: maplibregl.Map,
+  start: [number, number],
+  end: [number, number],
+): boolean {
+  const startPx = map.project(start);
+  const endPx = map.project(end);
+  const deltaX = Math.abs(startPx.x - endPx.x);
+  const deltaY = Math.abs(startPx.y - endPx.y);
+  return deltaX < 4 || deltaY < 4;
 }
 
 function emptyTrafficPointCollection(): GeoJSON.FeatureCollection<
@@ -696,22 +746,25 @@ function assignParticleRoute(
   particle: TrafficParticle,
   graph: Graph,
   routePool: TrafficRoute[],
+  spawnAtStart = false,
 ): boolean {
   const route = randomTrafficRoute(routePool);
   if (!route) {
     return false;
   }
 
-  const edgeIndex = Math.min(
-    route.edgeIds.length - 1,
-    Math.floor(Math.random() * Math.max(1, route.edgeIds.length)),
-  );
+  const edgeIndex = spawnAtStart
+    ? 0
+    : Math.min(
+        route.edgeIds.length - 1,
+        Math.floor(Math.random() * Math.max(1, route.edgeIds.length)),
+      );
   const edge = graph.edgesById.get(route.edgeIds[edgeIndex]);
   if (!edge) {
     return false;
   }
 
-  const edgeProgressM = Math.random() * Math.max(1, edge.lengthM * 0.8);
+  const edgeProgressM = spawnAtStart ? 0 : Math.random() * Math.max(1, edge.lengthM * 0.8);
   particle.route = route;
   particle.edgeIndex = edgeIndex;
   particle.edgeProgressM = edgeProgressM;
@@ -728,8 +781,8 @@ function buildTrafficParticles(
   }
 
   const particleCount = clampNumber(
-    Math.max(40, Math.round(routePool.length * 0.14)),
-    40,
+    Math.max(260, Math.round(routePool.length * 0.55)),
+    260,
     TRAFFIC_PARTICLE_MAX_COUNT,
   );
 
@@ -749,6 +802,9 @@ function buildTrafficParticles(
       edgeIndex: 0,
       edgeProgressM: 0,
       position: firstEdge.coords[0] ?? [0, 0],
+      speedFactor: 0.9 + Math.random() * 0.65,
+      headwayFactor: 0.82 + Math.random() * 0.42,
+      currentSpeedMps: 3 + Math.random() * 6,
     };
     if (!assignParticleRoute(particle, graph, routePool)) {
       continue;
@@ -759,74 +815,241 @@ function buildTrafficParticles(
   return particles;
 }
 
+function hashNodeId(nodeId: string): number {
+  let hash = 0;
+  for (let idx = 0; idx < nodeId.length; idx += 1) {
+    hash = (hash * 31 + nodeId.charCodeAt(idx)) >>> 0;
+  }
+  return hash;
+}
+
+function movementAxisForEdge(edge: Edge): 0 | 1 {
+  const start = edge.coords[0];
+  const end = edge.coords[edge.coords.length - 1];
+  if (!start || !end) {
+    return 0;
+  }
+  const deltaLng = Math.abs(end[0] - start[0]);
+  const deltaLat = Math.abs(end[1] - start[1]);
+  return deltaLng >= deltaLat ? 0 : 1;
+}
+
+function isIntersectionSignalGreen(nodeId: string, incomingEdge: Edge, simTimeSec: number): boolean {
+  const hash = hashNodeId(nodeId);
+  const cycle =
+    TRAFFIC_SIGNAL_BASE_CYCLE_SEC + (hash % Math.max(1, TRAFFIC_SIGNAL_CYCLE_VARIANCE_SEC));
+  const greenDuration = cycle * TRAFFIC_SIGNAL_GREEN_RATIO;
+  const phaseOffset = ((hash >>> 3) % 1000) / 1000 * cycle;
+  const phase = (simTimeSec + phaseOffset) % cycle;
+  const primaryAxis = ((hash >>> 7) & 1) as 0 | 1;
+  const movementAxis = movementAxisForEdge(incomingEdge);
+  const primaryIsGreen = phase < greenDuration;
+  return movementAxis === primaryAxis ? primaryIsGreen : !primaryIsGreen;
+}
+
+function buildEdgeVehicleBuckets(particles: TrafficParticle[]): Map<string, TrafficParticle[]> {
+  const buckets = new Map<string, TrafficParticle[]>();
+  for (const particle of particles) {
+    const edgeId = particle.route.edgeIds[particle.edgeIndex];
+    if (!edgeId) {
+      continue;
+    }
+    const edgeVehicles = buckets.get(edgeId);
+    if (edgeVehicles) {
+      edgeVehicles.push(particle);
+    } else {
+      buckets.set(edgeId, [particle]);
+    }
+  }
+  for (const edgeVehicles of buckets.values()) {
+    if (edgeVehicles.length > 1) {
+      edgeVehicles.sort((a, b) => b.edgeProgressM - a.edgeProgressM);
+    }
+  }
+  return buckets;
+}
+
 function advanceTrafficParticles(
   particles: TrafficParticle[],
   graph: Graph,
   edgeMetrics: Map<string, EdgeMetric>,
   routePool: TrafficRoute[],
+  simTimeSec: number,
+  nodeNextRelease: Map<string, number>,
   deltaSeconds: number,
 ): void {
   if (particles.length === 0) {
     return;
   }
 
-  const dt = Math.max(0.01, Math.min(0.3, deltaSeconds));
-  for (const particle of particles) {
-    let edgeId = particle.route.edgeIds[particle.edgeIndex];
-    let edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
-    let metric = edge ? edgeMetrics.get(edge.id) : undefined;
+  const dt = Math.max(0.02, Math.min(0.25, deltaSeconds));
+  const edgeBuckets = buildEdgeVehicleBuckets(particles);
 
-    if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
-      if (!assignParticleRoute(particle, graph, routePool)) {
-        continue;
-      }
-      edgeId = particle.route.edgeIds[particle.edgeIndex];
-      edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
-      metric = edge ? edgeMetrics.get(edge.id) : undefined;
+  for (const edgeVehicles of edgeBuckets.values()) {
+    let leaderProgressOnEdge = Number.POSITIVE_INFINITY;
+
+    for (let idx = 0; idx < edgeVehicles.length; idx += 1) {
+      const particle = edgeVehicles[idx];
+      const startingEdgeId = particle.route.edgeIds[particle.edgeIndex];
+      let edgeId = startingEdgeId;
+      let edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+      let metric = edge ? edgeMetrics.get(edge.id) : undefined;
+
       if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
-        continue;
-      }
-    }
-
-    const speedMps = edgeSpeedMps(edge.lengthM, metric) * TRAFFIC_PARTICLE_SPEED_SCALE;
-    particle.edgeProgressM += speedMps * dt;
-
-    let edgeLength = Math.max(1, edge.lengthM);
-    let hop = 0;
-    while (particle.edgeProgressM >= edgeLength && hop < 6) {
-      particle.edgeProgressM -= edgeLength;
-      particle.edgeIndex += 1;
-      hop += 1;
-
-      if (particle.edgeIndex >= particle.route.edgeIds.length) {
-        if (!assignParticleRoute(particle, graph, routePool)) {
-          break;
-        }
-      }
-
-      edgeId = particle.route.edgeIds[particle.edgeIndex];
-      edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
-      metric = edge ? edgeMetrics.get(edge.id) : undefined;
-      if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
-        if (!assignParticleRoute(particle, graph, routePool)) {
-          break;
+        if (!assignParticleRoute(particle, graph, routePool, true)) {
+          continue;
         }
         edgeId = particle.route.edgeIds[particle.edgeIndex];
         edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
         metric = edge ? edgeMetrics.get(edge.id) : undefined;
         if (!edge || !metric || metric.closed || !Number.isFinite(metric.time)) {
-          break;
+          continue;
         }
       }
-      edgeLength = Math.max(1, edge.lengthM);
-    }
 
-    edgeId = particle.route.edgeIds[particle.edgeIndex];
-    edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
-    if (!edge) {
-      continue;
+      const edgeLength = Math.max(1, edge.lengthM);
+      const stopLineProgress = Math.max(0, edgeLength - TRAFFIC_INTERSECTION_HOLD_BACK_M);
+      const distanceToStop = stopLineProgress - particle.edgeProgressM;
+      const baseSpeedMps =
+        edgeSpeedMps(edge.lengthM, metric) * TRAFFIC_PARTICLE_SPEED_SCALE * particle.speedFactor;
+
+      const minGapM = TRAFFIC_FOLLOW_MIN_GAP_M * particle.headwayFactor;
+      const desiredGapM =
+        minGapM +
+        particle.currentSpeedMps * TRAFFIC_FOLLOW_TIME_HEADWAY_SEC * particle.headwayFactor;
+
+      let targetSpeedMps = baseSpeedMps;
+      if (Number.isFinite(leaderProgressOnEdge)) {
+        const gapToLeaderM = leaderProgressOnEdge - particle.edgeProgressM;
+        if (gapToLeaderM <= minGapM) {
+          targetSpeedMps = 0;
+        } else {
+          const headwayLimitedSpeed = Math.max(0, (gapToLeaderM - desiredGapM) / dt);
+          targetSpeedMps = Math.min(targetSpeedMps, headwayLimitedSpeed);
+        }
+      }
+
+      if (distanceToStop <= TRAFFIC_INTERSECTION_SLOW_ZONE_M) {
+        const approachRatio = clampNumber(distanceToStop / TRAFFIC_INTERSECTION_SLOW_ZONE_M, 0, 1);
+        const slowdown =
+          TRAFFIC_INTERSECTION_SLOW_FACTOR +
+          (1 - TRAFFIC_INTERSECTION_SLOW_FACTOR) * approachRatio;
+        targetSpeedMps = Math.min(
+          targetSpeedMps,
+          baseSpeedMps * clampNumber(slowdown, TRAFFIC_INTERSECTION_SLOW_FACTOR, 1),
+        );
+      }
+
+      const nextOpenTime = nodeNextRelease.get(edge.to) ?? 0;
+      const movementGreen = isIntersectionSignalGreen(edge.to, edge, simTimeSec);
+      if (!movementGreen || simTimeSec < nextOpenTime) {
+        const stoppingSpeedLimit = Math.max(0, distanceToStop) / dt;
+        targetSpeedMps = Math.min(targetSpeedMps, stoppingSpeedLimit);
+      }
+
+      if (!Number.isFinite(particle.currentSpeedMps) || particle.currentSpeedMps < 0) {
+        particle.currentSpeedMps = 0;
+      }
+      const accelStep = TRAFFIC_MAX_ACCEL_MPS2 * dt;
+      const brakeStep = TRAFFIC_MAX_BRAKE_MPS2 * dt;
+      if (targetSpeedMps > particle.currentSpeedMps) {
+        particle.currentSpeedMps = Math.min(targetSpeedMps, particle.currentSpeedMps + accelStep);
+      } else {
+        particle.currentSpeedMps = Math.max(targetSpeedMps, particle.currentSpeedMps - brakeStep);
+      }
+
+      let candidateProgress = particle.edgeProgressM + particle.currentSpeedMps * dt;
+      if (Number.isFinite(leaderProgressOnEdge)) {
+        const maxProgress = leaderProgressOnEdge - minGapM;
+        candidateProgress = Math.min(candidateProgress, maxProgress);
+      }
+      candidateProgress = Math.max(particle.edgeProgressM, candidateProgress);
+
+      let hop = 0;
+      let activeEdge: Edge | undefined = edge;
+      let activeMetric: EdgeMetric | undefined = metric;
+      let activeEdgeLength = edgeLength;
+
+      while (candidateProgress >= activeEdgeLength && hop < 6) {
+        const nodeId = activeEdge.to;
+        const activeNextOpenTime = nodeNextRelease.get(nodeId) ?? 0;
+        const signalGreen = isIntersectionSignalGreen(nodeId, activeEdge, simTimeSec);
+        if (simTimeSec < activeNextOpenTime || !signalGreen) {
+          const holdAt = Math.max(0, activeEdgeLength - TRAFFIC_INTERSECTION_HOLD_BACK_M);
+          candidateProgress = Math.min(candidateProgress, holdAt);
+          if (candidateProgress >= holdAt - TRAFFIC_INTERSECTION_STOP_EPS_M) {
+            particle.currentSpeedMps = Math.min(particle.currentSpeedMps, 0.8);
+          }
+          break;
+        }
+
+        nodeNextRelease.set(nodeId, simTimeSec + TRAFFIC_INTERSECTION_HEADWAY_SEC);
+        candidateProgress -= activeEdgeLength;
+        particle.edgeIndex += 1;
+        hop += 1;
+
+        if (particle.edgeIndex >= particle.route.edgeIds.length) {
+          if (!assignParticleRoute(particle, graph, routePool, true)) {
+            break;
+          }
+          particle.currentSpeedMps = Math.max(2.5, particle.currentSpeedMps * 0.65);
+          candidateProgress = particle.edgeProgressM;
+        }
+
+        edgeId = particle.route.edgeIds[particle.edgeIndex];
+        activeEdge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+        activeMetric = activeEdge ? edgeMetrics.get(activeEdge.id) : undefined;
+        if (
+          !activeEdge ||
+          !activeMetric ||
+          activeMetric.closed ||
+          !Number.isFinite(activeMetric.time)
+        ) {
+          if (!assignParticleRoute(particle, graph, routePool, true)) {
+            break;
+          }
+          edgeId = particle.route.edgeIds[particle.edgeIndex];
+          activeEdge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+          activeMetric = activeEdge ? edgeMetrics.get(activeEdge.id) : undefined;
+          if (
+            !activeEdge ||
+            !activeMetric ||
+            activeMetric.closed ||
+            !Number.isFinite(activeMetric.time)
+          ) {
+            break;
+          }
+          particle.currentSpeedMps = Math.min(particle.currentSpeedMps, 2);
+          candidateProgress = particle.edgeProgressM;
+        }
+
+        activeEdgeLength = Math.max(1, activeEdge.lengthM);
+      }
+
+      edgeId = particle.route.edgeIds[particle.edgeIndex];
+      edge = edgeId ? graph.edgesById.get(edgeId) : undefined;
+      if (!edge) {
+        continue;
+      }
+      const finalEdgeLength = Math.max(1, edge.lengthM);
+      let clampedProgress = clampNumber(candidateProgress, 0, finalEdgeLength);
+      if (edgeId === startingEdgeId) {
+        const localStopLine = Math.max(0, finalEdgeLength - TRAFFIC_INTERSECTION_HOLD_BACK_M);
+        const localNextOpenTime = nodeNextRelease.get(edge.to) ?? 0;
+        const localGreen = isIntersectionSignalGreen(edge.to, edge, simTimeSec);
+        if ((!localGreen || simTimeSec < localNextOpenTime) && clampedProgress > localStopLine) {
+          clampedProgress = localStopLine;
+          particle.currentSpeedMps = Math.min(particle.currentSpeedMps, 0.8);
+        }
+      }
+      particle.edgeProgressM = clampedProgress;
+      particle.position = interpolateAlongEdge(edge, clampedProgress);
+      if (edgeId === startingEdgeId) {
+        leaderProgressOnEdge = clampedProgress;
+      } else {
+        leaderProgressOnEdge = Number.POSITIVE_INFINITY;
+      }
     }
-    particle.position = interpolateAlongEdge(edge, particle.edgeProgressM);
   }
 }
 
@@ -863,6 +1086,8 @@ export default function App() {
   const trafficParticlesRef = useRef<TrafficParticle[]>([]);
   const trafficRoutePoolRef = useRef<TrafficRoute[]>([]);
   const trafficEdgeMetricsRef = useRef<Map<string, EdgeMetric>>(new Map());
+  const trafficSimulationTimeRef = useRef(0);
+  const nodeNextReleaseRef = useRef<Map<string, number>>(new Map());
   const featureMetricsRef = useRef<Map<number, FeatureMetric>>(new Map());
   const trafficAnimationFrameRef = useRef<number | null>(null);
   const trafficLastFrameRef = useRef(0);
@@ -1148,6 +1373,7 @@ export default function App() {
       if (!source) {
         return;
       }
+      const rectangleCoords = rectangleCoordinatesScreenAligned(map, start, end);
       source.setData({
         type: "FeatureCollection",
         features: [
@@ -1162,6 +1388,7 @@ export default function App() {
             scalePercentToFactor(modelHeightScaleRef.current),
             rotationDegreesFromString(modelRotationDegRef.current),
             false,
+            rectangleCoords,
           ),
         ],
       });
@@ -1195,7 +1422,7 @@ export default function App() {
         source: TRAFFIC_PARTICLE_SOURCE_ID,
         paint: {
           "circle-color": "#22d3ee",
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.4, 14, 4.6, 17, 7.2],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3.2, 14, 5.8, 17, 8.6],
           "circle-opacity": 0.96,
           "circle-blur": 0.06,
           "circle-pitch-alignment": "map",
@@ -1279,6 +1506,8 @@ export default function App() {
       if (deltaMs >= TRAFFIC_PARTICLE_FRAME_MS) {
         trafficLastFrameRef.current = timestampMs;
         const particles = trafficParticlesRef.current;
+        const deltaSec = deltaMs / 1000;
+        trafficSimulationTimeRef.current += deltaSec;
 
         if (particles.length === 0) {
           updateTrafficParticleSource(activeMap, []);
@@ -1288,7 +1517,9 @@ export default function App() {
             activeGraph,
             trafficEdgeMetricsRef.current,
             trafficRoutePoolRef.current,
-            deltaMs / 1000,
+            trafficSimulationTimeRef.current,
+            nodeNextReleaseRef.current,
+            deltaSec,
           );
           updateTrafficParticleSource(activeMap, trafficParticlesToFeatures(particles));
         }
@@ -1573,6 +1804,8 @@ export default function App() {
     featureMetricsRef.current = result.featureMetrics;
     trafficRoutePoolRef.current = buildTrafficRoutePool(graph, odPairsRef.current, result.edgeMetrics);
     trafficParticlesRef.current = buildTrafficParticles(graph, trafficRoutePoolRef.current);
+    trafficSimulationTimeRef.current = 0;
+    nodeNextReleaseRef.current = new Map();
     startTrafficParticleAnimation();
     const updatedRoads = applyMetricsToRoads(roads, result.featureMetrics);
     updateRoadSourceData(map, updatedRoads);
@@ -1661,6 +1894,8 @@ export default function App() {
       featureMetricsRef.current = baseline.featureMetrics;
       trafficRoutePoolRef.current = buildTrafficRoutePool(graph, odPairsRef.current, baseline.edgeMetrics);
       trafficParticlesRef.current = buildTrafficParticles(graph, trafficRoutePoolRef.current);
+      trafficSimulationTimeRef.current = 0;
+      nodeNextReleaseRef.current = new Map();
       startTrafficParticleAnimation();
       const roadsWithMetrics = applyMetricsToRoads(roads, baseline.featureMetrics);
       addRoadLayers(map, roadsWithMetrics);
@@ -1929,7 +2164,7 @@ export default function App() {
       }
 
       const dragEnd: [number, number] = [event.lngLat.lng, event.lngLat.lat];
-      if (rectangleAreaTooSmall(dragStart, dragEnd)) {
+      if (rectangleAreaTooSmallScreen(map, dragStart, dragEnd)) {
         setStatusText("Building not added. Drag a larger rectangle.");
         return;
       }
@@ -1937,6 +2172,7 @@ export default function App() {
       const scaleHeight = scalePercentToFactor(modelHeightScaleRef.current);
       const heightValue = Math.max(1, BASE_BUILDING_HEIGHT_M * scaleHeight);
       const buildingId = `rect-${Date.now()}`;
+      const rectangleCoords = rectangleCoordinatesScreenAligned(map, dragStart, dragEnd);
       const buildingFeature = createRectangleFeature(
         buildingId,
         dragStart,
@@ -1948,6 +2184,7 @@ export default function App() {
         scaleHeight,
         rotationDegreesFromString(modelRotationDegRef.current),
         true,
+        rectangleCoords,
       );
       addPolygonBuilding(map, buildingFeature);
       scheduleSimulation(0);
@@ -2083,6 +2320,8 @@ export default function App() {
       trafficParticlesRef.current = [];
       trafficRoutePoolRef.current = [];
       trafficEdgeMetricsRef.current = new Map();
+      trafficSimulationTimeRef.current = 0;
+      nodeNextReleaseRef.current = new Map();
       if (drawControlRef.current) {
         const handlers = (map as any)._polygonHandlers;
         if (handlers) {
@@ -2422,13 +2661,6 @@ export default function App() {
               ? "Polygon draw mode active."
               : "Free move mode: click roads to toggle closures and click buildings to select."}
         </p>
-        <div className="legend">
-          <span className="chip flow-good">delay 1.0</span>
-          <span className="chip flow-mid">delay 1.3+</span>
-          <span className="chip flow-high">delay 1.8+</span>
-          <span className="chip flow-closed">closed</span>
-          <span className="chip flow-live">live flow</span>
-        </div>
       </section>
 
       <section className="shape-panel">

@@ -402,12 +402,6 @@ export default function App() {
           <div>Unreachable trips: {stats.unreachable}</div>
         </div>
         <p className="hint">Click a road to toggle closure and reroute traffic.</p>
-        <div className="legend">
-          <span className="chip flow-good">delay 1.0</span>
-          <span className="chip flow-mid">delay 1.3+</span>
-          <span className="chip flow-high">delay 1.8+</span>
-          <span className="chip flow-closed">closed</span>
-        </div>
       </section>
     </div>
   );
