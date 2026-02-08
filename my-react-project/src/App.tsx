@@ -51,8 +51,12 @@ type FeatureLike = {
   geometry?: GeoJSON.Geometry;
 };
 
-type BuildingModelType = "building" | "large-building" | "schoolhouse" | "construction-sign";
-type SliderDrivesDimension = "height" | "width" | "thickness";
+type BuildingModelType =
+  | "building"
+  | "large-building"
+  | "schoolhouse"
+  | "construction-sign"
+  | "restaurant";
 type BuildingModelOption = {
   id: BuildingModelType;
   label: string;
@@ -62,7 +66,6 @@ type BuildingModelOption = {
   referenceHeightM: number;
   supersizeMultiplier: number;
   orientation: [number, number, number];
-  sliderDrives: SliderDrivesDimension;
 };
 type ScenegraphBuildingInstance = {
   id: string;
@@ -98,18 +101,33 @@ const RECTANGLE_PREVIEW_FILL_LAYER_ID = "rectangle-preview-fill";
 const RECTANGLE_PREVIEW_LINE_LAYER_ID = "rectangle-preview-line";
 // Central model tuning table: scale calibration, rotation, and slider behavior per model.
 const DEFAULT_MODEL_RENDER_PARAMS = {
-  supersizeMultiplier: 20,
-  orientation: [0, 0, 0] as [number, number, number],
-  sliderDrives: "height" as SliderDrivesDimension,
+  supersizeMultiplier: 5,
+  orientation: [0, 0, 90] as [number, number, number],
 };
+const BASE_BUILDING_HEIGHT_M = 40;
+const MIN_MODEL_SCALE_PERCENT = 10;
+const MAX_MODEL_SCALE_PERCENT = 500;
+const DEFAULT_MODEL_SCALE_PERCENT = "100";
+const MIN_MODEL_ROTATION_DEG = -180;
+const MAX_MODEL_ROTATION_DEG = 180;
+const DEFAULT_MODEL_ROTATION_DEG = "0";
 const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
   {
     id: "building",
-    label: "Building",
-    modelUrl: new URL("../3d_models/Building.glb", import.meta.url).href,
+    label: "Store",
+    modelUrl: new URL("../3d_models/Store.glb", import.meta.url).href,
     referenceWidthM: 20,
     referenceDepthM: 20,
     referenceHeightM: 20,
+    ...DEFAULT_MODEL_RENDER_PARAMS,
+  },
+  {
+    id: "restaurant",
+    label: "Restaurant",
+    modelUrl: new URL("../3d_models/Dining car.glb", import.meta.url).href,
+    referenceWidthM: 70,
+    referenceDepthM: 70,
+    referenceHeightM: 70,
     ...DEFAULT_MODEL_RENDER_PARAMS,
   },
   {
@@ -119,9 +137,8 @@ const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
     referenceWidthM: 24,
     referenceDepthM: 24,
     referenceHeightM: 24,
+    ...DEFAULT_MODEL_RENDER_PARAMS,
     supersizeMultiplier: 10,
-    orientation: [0, 0, 90],
-    sliderDrives: "thickness",
   },
   {
     id: "schoolhouse",
@@ -131,6 +148,7 @@ const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
     referenceDepthM: 16,
     referenceHeightM: 16,
     ...DEFAULT_MODEL_RENDER_PARAMS,
+    supersizeMultiplier: 2,
   },
   {
     id: "construction-sign",
@@ -140,6 +158,7 @@ const BUILDING_MODEL_OPTIONS: ReadonlyArray<BuildingModelOption> = [
     referenceDepthM: 3,
     referenceHeightM: 3,
     ...DEFAULT_MODEL_RENDER_PARAMS,
+    supersizeMultiplier: 1,
   },
 ];
 
@@ -305,6 +324,58 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function scalePercentToFactor(value: string): number {
+  const parsed = Number.parseFloat(value);
+  const normalizedPercent = Number.isFinite(parsed) ? parsed : 100;
+  return clampNumber(normalizedPercent, MIN_MODEL_SCALE_PERCENT, MAX_MODEL_SCALE_PERCENT) / 100;
+}
+
+function factorToScalePercentString(factor: number): string {
+  const percent = clampNumber(factor * 100, MIN_MODEL_SCALE_PERCENT, MAX_MODEL_SCALE_PERCENT);
+  return String(Math.round(percent));
+}
+
+function readFeatureScaleFactor(properties: Record<string, unknown>, key: "scaleLength" | "scaleWidth" | "scaleHeight"): number {
+  const parsed = Number.parseFloat(String(properties[key] ?? 1));
+  const value = Number.isFinite(parsed) ? parsed : 1;
+  return clampNumber(value, MIN_MODEL_SCALE_PERCENT / 100, MAX_MODEL_SCALE_PERCENT / 100);
+}
+
+function readFeatureScaleFactorOrDefault(
+  properties: Record<string, unknown>,
+  key: "scaleLength" | "scaleWidth" | "scaleHeight",
+  defaultValue: number,
+): number {
+  const raw = properties[key];
+  if (raw === undefined || raw === null) {
+    return clampNumber(defaultValue, MIN_MODEL_SCALE_PERCENT / 100, MAX_MODEL_SCALE_PERCENT / 100);
+  }
+  return readFeatureScaleFactor(properties, key);
+}
+
+function rotationDegreesFromString(value: string): number {
+  const parsed = Number.parseFloat(value);
+  const normalized = Number.isFinite(parsed) ? parsed : 0;
+  return clampNumber(normalized, MIN_MODEL_ROTATION_DEG, MAX_MODEL_ROTATION_DEG);
+}
+
+function readFeatureRotationDeg(properties: Record<string, unknown>): number {
+  const parsed = Number.parseFloat(String(properties.rotationDeg ?? 0));
+  const value = Number.isFinite(parsed) ? parsed : 0;
+  return clampNumber(value, MIN_MODEL_ROTATION_DEG, MAX_MODEL_ROTATION_DEG);
+}
+
+function readFeatureRotationDegOrDefault(
+  properties: Record<string, unknown>,
+  defaultValue: number,
+): number {
+  const raw = properties.rotationDeg;
+  if (raw === undefined || raw === null) {
+    return clampNumber(defaultValue, MIN_MODEL_ROTATION_DEG, MAX_MODEL_ROTATION_DEG);
+  }
+  return readFeatureRotationDeg(properties);
+}
+
 function asPropertiesRecord(
   properties: GeoJSON.GeoJsonProperties | null | undefined,
 ): Record<string, unknown> {
@@ -426,21 +497,20 @@ function buildScenegraphInstances(
     const dims = polygonFootprintDimensionsMeters(feature);
     const widthM = dims?.widthM ?? 20;
     const depthM = dims?.depthM ?? 20;
-    let scaledWidthM = widthM;
-    let scaledDepthM = depthM;
-    let scaledHeightM = heightValue;
-    if (option.sliderDrives === "width") {
-      scaledWidthM = heightValue;
-      scaledHeightM = widthM;
-    } else if (option.sliderDrives === "thickness") {
-      scaledHeightM = heightValue;
-    }
+    const scaleLength = readFeatureScaleFactor(properties, "scaleLength");
+    const scaleWidth = readFeatureScaleFactor(properties, "scaleWidth");
+    const scaleHeight = readFeatureScaleFactor(properties, "scaleHeight");
+    const rotationDeg = readFeatureRotationDeg(properties);
+    const scaledWidthM = widthM * scaleLength;
+    const scaledDepthM = depthM * scaleWidth;
+    const scaledHeightM = heightValue * scaleHeight;
     instances.push({
       id,
       modelType,
       position: [center[0], center[1], 0],
       scale: scaleFromDimensions(modelType, scaledWidthM, scaledDepthM, scaledHeightM),
-      orientation: option.orientation,
+      // Apply user rotation as yaw so models rotate on the horizontal plane.
+      orientation: [option.orientation[0], option.orientation[1] + rotationDeg, option.orientation[2]],
     });
   }
   return instances;
@@ -471,6 +541,10 @@ function createRectangleFeature(
   end: [number, number],
   height: number,
   modelType: BuildingModelType,
+  scaleLength: number,
+  scaleWidth: number,
+  scaleHeight: number,
+  rotationDeg: number,
   selected = false,
 ): GeoJSON.Feature<GeoJSON.Polygon> {
   return {
@@ -486,6 +560,10 @@ function createRectangleFeature(
       type: "rectangle-building",
       baseHeight: 0,
       modelType,
+      scaleLength,
+      scaleWidth,
+      scaleHeight,
+      rotationDeg,
       selected,
     },
   };
@@ -798,7 +876,10 @@ export default function App() {
   const selectedModelTypeRef = useRef<BuildingModelType>("building");
   const buildingModeRef = useRef(false);
   const drawModeRef = useRef(false);
-  const rectHeightRef = useRef("40");
+  const modelLengthScaleRef = useRef(DEFAULT_MODEL_SCALE_PERCENT);
+  const modelWidthScaleRef = useRef(DEFAULT_MODEL_SCALE_PERCENT);
+  const modelHeightScaleRef = useRef(DEFAULT_MODEL_SCALE_PERCENT);
+  const modelRotationDegRef = useRef(DEFAULT_MODEL_ROTATION_DEG);
   const rectangleDragActiveRef = useRef(false);
   const rectangleDragStartRef = useRef<[number, number] | null>(null);
   const rectangleDragCurrentRef = useRef<[number, number] | null>(null);
@@ -820,7 +901,10 @@ export default function App() {
   const [drawMode, setDrawMode] = useState(false);
   const [showResultsPanel, setShowResultsPanel] = useState(false);
   const [polygonBuildings, setPolygonBuildings] = useState<Map<string, GeoJSON.Feature>>(new Map());
-  const [rectHeight, setRectHeight] = useState("40");
+  const [modelLengthScale, setModelLengthScale] = useState(DEFAULT_MODEL_SCALE_PERCENT);
+  const [modelWidthScale, setModelWidthScale] = useState(DEFAULT_MODEL_SCALE_PERCENT);
+  const [modelHeightScale, setModelHeightScale] = useState(DEFAULT_MODEL_SCALE_PERCENT);
+  const [modelRotationDeg, setModelRotationDeg] = useState(DEFAULT_MODEL_ROTATION_DEG);
   const [rectFirstCorner, setRectFirstCorner] = useState<[number, number] | null>(null);
 
   useEffect(() => {
@@ -854,8 +938,20 @@ export default function App() {
   }, [buildingMode]);
 
   useEffect(() => {
-    rectHeightRef.current = rectHeight;
-  }, [rectHeight]);
+    modelLengthScaleRef.current = modelLengthScale;
+  }, [modelLengthScale]);
+
+  useEffect(() => {
+    modelWidthScaleRef.current = modelWidthScale;
+  }, [modelWidthScale]);
+
+  useEffect(() => {
+    modelHeightScaleRef.current = modelHeightScale;
+  }, [modelHeightScale]);
+
+  useEffect(() => {
+    modelRotationDegRef.current = modelRotationDeg;
+  }, [modelRotationDeg]);
 
   useEffect(() => {
     drawModeRef.current = drawMode;
@@ -1062,6 +1158,10 @@ export default function App() {
             end,
             height,
             selectedModelTypeRef.current,
+            scalePercentToFactor(modelLengthScaleRef.current),
+            scalePercentToFactor(modelWidthScaleRef.current),
+            scalePercentToFactor(modelHeightScaleRef.current),
+            rotationDegreesFromString(modelRotationDegRef.current),
             false,
           ),
         ],
@@ -1203,7 +1303,10 @@ export default function App() {
 
   const setPolygonBuildingSelection = useCallback(
     (map: maplibregl.Map, nextSelectedId: string | null) => {
-      let selectedHeight: number | null = null;
+      let selectedScaleLength: number | null = null;
+      let selectedScaleWidth: number | null = null;
+      let selectedScaleHeight: number | null = null;
+      let selectedRotationDeg: number | null = null;
       let selectedModel: BuildingModelType | null = null;
       let resolvedSelectedId: string | null = nextSelectedId;
       setPolygonBuildings((prev) => {
@@ -1215,10 +1318,10 @@ export default function App() {
           const properties = asPropertiesRecord(feature.properties);
           const isSelected = id === resolvedSelectedId;
           if (isSelected) {
-            const heightValue = Number.parseFloat(String(properties.height));
-            if (Number.isFinite(heightValue)) {
-              selectedHeight = heightValue;
-            }
+            selectedScaleLength = readFeatureScaleFactor(properties, "scaleLength");
+            selectedScaleWidth = readFeatureScaleFactor(properties, "scaleWidth");
+            selectedScaleHeight = readFeatureScaleFactor(properties, "scaleHeight");
+            selectedRotationDeg = readFeatureRotationDeg(properties);
             selectedModel = asBuildingModelType(properties.modelType) ?? "building";
           }
           next.set(id, {
@@ -1235,16 +1338,26 @@ export default function App() {
         return next;
       });
       setSelectedPolygonBuildingId(resolvedSelectedId);
-      if (selectedHeight !== null) {
-        setRectHeight(String(selectedHeight));
+      if (selectedScaleLength !== null) {
+        setModelLengthScale(factorToScalePercentString(selectedScaleLength));
+      }
+      if (selectedScaleWidth !== null) {
+        setModelWidthScale(factorToScalePercentString(selectedScaleWidth));
+      }
+      if (selectedScaleHeight !== null) {
+        setModelHeightScale(factorToScalePercentString(selectedScaleHeight));
       }
       if (selectedModel) {
         setSelectedModelType(selectedModel);
+      }
+      if (selectedRotationDeg !== null) {
+        setModelRotationDeg(String(Math.round(selectedRotationDeg)));
       }
       if (resolvedSelectedId) {
         const selectedModelOption = getBuildingModelOption(selectedModel ?? "building");
         console.log("[BUILDING SELECT] Selected building", {
           id: resolvedSelectedId,
+          rotationDeg: selectedRotationDeg ?? 0,
           modelType: selectedModelOption.id,
           modelLabel: selectedModelOption.label,
           modelUrl: selectedModelOption.modelUrl,
@@ -1260,8 +1373,31 @@ export default function App() {
     (map: maplibregl.Map, feature: GeoJSON.Feature) => {
       const buildingId = extractBuildingId(feature) ?? `rect-${Date.now()}`;
       const rawProperties = asPropertiesRecord(feature.properties);
-      const heightValue = Math.max(1, Number.parseFloat(String(rawProperties.height ?? rectHeightRef.current)) || 20);
       const modelType = asBuildingModelType(rawProperties.modelType) ?? selectedModelTypeRef.current;
+      const scaleLength = readFeatureScaleFactorOrDefault(
+        rawProperties,
+        "scaleLength",
+        scalePercentToFactor(modelLengthScaleRef.current),
+      );
+      const scaleWidth = readFeatureScaleFactorOrDefault(
+        rawProperties,
+        "scaleWidth",
+        scalePercentToFactor(modelWidthScaleRef.current),
+      );
+      const scaleHeight = readFeatureScaleFactorOrDefault(
+        rawProperties,
+        "scaleHeight",
+        scalePercentToFactor(modelHeightScaleRef.current),
+      );
+      const rotationDeg = readFeatureRotationDegOrDefault(
+        rawProperties,
+        rotationDegreesFromString(modelRotationDegRef.current),
+      );
+      const heightValue = Math.max(
+        1,
+        Number.parseFloat(String(rawProperties.height ?? BASE_BUILDING_HEIGHT_M * scaleHeight)) ||
+          BASE_BUILDING_HEIGHT_M * scaleHeight,
+      );
 
       setPolygonBuildings((prev) => {
         const next = new Map<string, GeoJSON.Feature>();
@@ -1286,6 +1422,10 @@ export default function App() {
             type: rawProperties.type ?? "rectangle-building",
             baseHeight: rawProperties.baseHeight ?? 0,
             modelType,
+            scaleLength,
+            scaleWidth,
+            scaleHeight,
+            rotationDeg,
             selected: true,
           },
         });
@@ -1297,12 +1437,18 @@ export default function App() {
       });
 
       setSelectedPolygonBuildingId(buildingId);
-      setRectHeight(String(heightValue));
+      setModelLengthScale(factorToScalePercentString(scaleLength));
+      setModelWidthScale(factorToScalePercentString(scaleWidth));
+      setModelHeightScale(factorToScalePercentString(scaleHeight));
+      setModelRotationDeg(String(Math.round(rotationDeg)));
       setSelectedModelType(modelType);
       const modelOption = getBuildingModelOption(modelType);
       console.log("[BUILDING ADD] Added building", {
         id: buildingId,
-        height: heightValue,
+        scaleLength,
+        scaleWidth,
+        scaleHeight,
+        rotationDeg,
         modelType: modelOption.id,
         modelLabel: modelOption.label,
         modelUrl: modelOption.modelUrl,
@@ -1763,7 +1909,7 @@ export default function App() {
       rectangleDragCurrentRef.current = dragStart;
       rectFirstCornerRef.current = dragStart;
       setRectFirstCorner(dragStart);
-      const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
+      const heightValue = Math.max(1, BASE_BUILDING_HEIGHT_M * scalePercentToFactor(modelHeightScaleRef.current));
       updateRectanglePreview(map, dragStart, dragStart, heightValue);
       setStatusText("Drag to define building footprint.");
     };
@@ -1789,7 +1935,8 @@ export default function App() {
         return;
       }
 
-      const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
+      const scaleHeight = scalePercentToFactor(modelHeightScaleRef.current);
+      const heightValue = Math.max(1, BASE_BUILDING_HEIGHT_M * scaleHeight);
       const buildingId = `rect-${Date.now()}`;
       const buildingFeature = createRectangleFeature(
         buildingId,
@@ -1797,11 +1944,15 @@ export default function App() {
         dragEnd,
         heightValue,
         selectedModelTypeRef.current,
+        scalePercentToFactor(modelLengthScaleRef.current),
+        scalePercentToFactor(modelWidthScaleRef.current),
+        scaleHeight,
+        rotationDegreesFromString(modelRotationDegRef.current),
         true,
       );
       addPolygonBuilding(map, buildingFeature);
       scheduleSimulation(0);
-      setStatusText(`Building created (height ${heightValue}m).`);
+      setStatusText(`Building created.`);
     };
 
     const handleMapClick = (event: maplibregl.MapMouseEvent) => {
@@ -1881,7 +2032,7 @@ export default function App() {
         if (dragStart) {
           const dragCurrent: [number, number] = [event.lngLat.lng, event.lngLat.lat];
           rectangleDragCurrentRef.current = dragCurrent;
-          const heightValue = Math.max(1, Number.parseFloat(rectHeightRef.current) || 20);
+          const heightValue = Math.max(1, BASE_BUILDING_HEIGHT_M * scalePercentToFactor(modelHeightScaleRef.current));
           updateRectanglePreview(map, dragStart, dragCurrent, heightValue);
         }
         map.getCanvas().style.cursor = "crosshair";
@@ -2039,10 +2190,29 @@ export default function App() {
     setStatusText("Selected building deleted.");
   }, [scheduleSimulation, updatePolygonBuildingsSource, updateScenegraphOverlay]);
 
-  const handleRectHeightChange = useCallback(
-    (value: string) => {
-      setRectHeight(value);
-      const heightValue = clampNumber(Math.max(1, Number.parseFloat(value) || 20), 1, 300);
+  const handleModelScaleChange = useCallback(
+    (dimension: "length" | "width" | "height", value: string) => {
+      if (dimension === "length") {
+        setModelLengthScale(value);
+      } else if (dimension === "width") {
+        setModelWidthScale(value);
+      } else {
+        setModelHeightScale(value);
+      }
+
+      const nextLengthScale =
+        dimension === "length"
+          ? scalePercentToFactor(value)
+          : scalePercentToFactor(modelLengthScaleRef.current);
+      const nextWidthScale =
+        dimension === "width"
+          ? scalePercentToFactor(value)
+          : scalePercentToFactor(modelWidthScaleRef.current);
+      const nextHeightScale =
+        dimension === "height"
+          ? scalePercentToFactor(value)
+          : scalePercentToFactor(modelHeightScaleRef.current);
+
       const map = mapRef.current;
       const selectedId = selectedPolygonBuildingIdRef.current;
 
@@ -2050,13 +2220,16 @@ export default function App() {
         const dragStart = rectangleDragStartRef.current;
         const dragCurrent = rectangleDragCurrentRef.current;
         if (dragStart && dragCurrent) {
-          updateRectanglePreview(map, dragStart, dragCurrent, heightValue);
+          const previewHeight = Math.max(1, BASE_BUILDING_HEIGHT_M * nextHeightScale);
+          updateRectanglePreview(map, dragStart, dragCurrent, previewHeight);
         }
       }
 
       if (!map || !selectedId) {
         return;
       }
+
+      const nextHeight = Math.max(1, BASE_BUILDING_HEIGHT_M * nextHeightScale);
 
       setPolygonBuildings((prev) => {
         const selectedFeature = prev.get(selectedId);
@@ -2069,7 +2242,10 @@ export default function App() {
           ...selectedFeature,
           properties: {
             ...properties,
-            height: heightValue,
+            scaleLength: nextLengthScale,
+            scaleWidth: nextWidthScale,
+            scaleHeight: nextHeightScale,
+            height: nextHeight,
             selected: true,
           },
         });
@@ -2079,14 +2255,53 @@ export default function App() {
         return next;
       });
 
-      console.log("[BUILDING UPDATE] Updated selected building height", {
+      console.log("[BUILDING UPDATE] Updated selected building scale", {
         id: selectedId,
-        height: heightValue,
+        lengthScale: nextLengthScale,
+        widthScale: nextWidthScale,
+        heightScale: nextHeightScale,
       });
       scheduleSimulation(120);
     },
     [scheduleSimulation, updatePolygonBuildingsSource, updateRectanglePreview, updateScenegraphOverlay],
   );
+
+  const handleModelRotationChange = useCallback((value: string) => {
+    setModelRotationDeg(value);
+
+    const map = mapRef.current;
+    const selectedId = selectedPolygonBuildingIdRef.current;
+    if (!map || !selectedId) {
+      return;
+    }
+
+    const nextRotationDeg = rotationDegreesFromString(value);
+    setPolygonBuildings((prev) => {
+      const selectedFeature = prev.get(selectedId);
+      if (!selectedFeature) {
+        return prev;
+      }
+      const next = new Map(prev);
+      const properties = asPropertiesRecord(selectedFeature.properties);
+      next.set(selectedId, {
+        ...selectedFeature,
+        properties: {
+          ...properties,
+          rotationDeg: nextRotationDeg,
+          selected: true,
+        },
+      });
+      polygonBuildingsRef.current = next;
+      updatePolygonBuildingsSource(map, next);
+      updateScenegraphOverlay(next);
+      return next;
+    });
+
+    console.log("[BUILDING UPDATE] Updated selected building rotation", {
+      id: selectedId,
+      rotationDeg: nextRotationDeg,
+    });
+  }, [updatePolygonBuildingsSource, updateScenegraphOverlay]);
 
   const handleModelTypeChange = useCallback(
     (modelType: BuildingModelType) => {
@@ -2234,17 +2449,63 @@ export default function App() {
           </select>
         </div>
         <div className="shape-row">
+          <label htmlFor="shape-length">
+            Length: {scalePercentToFactor(modelLengthScale).toFixed(2)}x
+          </label>
+          <input
+            id="shape-length"
+            type="range"
+            min={MIN_MODEL_SCALE_PERCENT}
+            max={MAX_MODEL_SCALE_PERCENT}
+            step="1"
+            value={clampNumber(Number.parseFloat(modelLengthScale) || 100, MIN_MODEL_SCALE_PERCENT, MAX_MODEL_SCALE_PERCENT)}
+            onChange={(e) => handleModelScaleChange("length", e.target.value)}
+          />
+        </div>
+        <div className="shape-row">
+          <label htmlFor="shape-width">
+            Width: {scalePercentToFactor(modelWidthScale).toFixed(2)}x
+          </label>
+          <input
+            id="shape-width"
+            type="range"
+            min={MIN_MODEL_SCALE_PERCENT}
+            max={MAX_MODEL_SCALE_PERCENT}
+            step="1"
+            value={clampNumber(Number.parseFloat(modelWidthScale) || 100, MIN_MODEL_SCALE_PERCENT, MAX_MODEL_SCALE_PERCENT)}
+            onChange={(e) => handleModelScaleChange("width", e.target.value)}
+          />
+        </div>
+        <div className="shape-row">
           <label htmlFor="shape-height">
-            Height: {Math.max(1, Number.parseFloat(rectHeight) || 20).toFixed(0)} m
+            Height: {scalePercentToFactor(modelHeightScale).toFixed(2)}x
           </label>
           <input
             id="shape-height"
             type="range"
-            min="1"
-            max="300"
+            min={MIN_MODEL_SCALE_PERCENT}
+            max={MAX_MODEL_SCALE_PERCENT}
             step="1"
-            value={Math.max(1, Number.parseFloat(rectHeight) || 20)}
-            onChange={(e) => handleRectHeightChange(e.target.value)}
+            value={clampNumber(Number.parseFloat(modelHeightScale) || 100, MIN_MODEL_SCALE_PERCENT, MAX_MODEL_SCALE_PERCENT)}
+            onChange={(e) => handleModelScaleChange("height", e.target.value)}
+          />
+        </div>
+        <div className="shape-row">
+          <label htmlFor="shape-rotation">
+            Rotation: {Math.round(rotationDegreesFromString(modelRotationDeg))}°
+          </label>
+          <input
+            id="shape-rotation"
+            type="range"
+            min={MIN_MODEL_ROTATION_DEG}
+            max={MAX_MODEL_ROTATION_DEG}
+            step="1"
+            value={clampNumber(
+              Number.parseFloat(modelRotationDeg) || 0,
+              MIN_MODEL_ROTATION_DEG,
+              MAX_MODEL_ROTATION_DEG,
+            )}
+            onChange={(e) => handleModelRotationChange(e.target.value)}
           />
         </div>
         <p className="shape-help">
