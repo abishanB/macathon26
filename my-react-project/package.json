@@ -5,34 +5,38 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "tsx server/index.ts",
+    "dev:all": "concurrently \"npm run dev\" \"npm run server\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview",
-    "rag:ingest": "tsx scripts/ingest.ts",
-    "rag:test": "tsx scripts/test-rag.ts",
-    "rag:download-pdfs": "tsx scripts/download-pdfs.ts",
-    "rag:setup": "tsx scripts/download-pdfs.ts && tsx scripts/ingest.ts"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "^1.5.1",
-    "@mapbox/mapbox-gl-geocoder": "^5.1.2",
+    "@mapbox/vector-tile": "^2.0.4",
     "@turf/turf": "^7.3.3",
-    "dotenv": "^17.2.4",
-    "mapbox-gl": "^3.18.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "maplibre-gl": "^5.17.0",
+    "node-fetch": "^3.3.2",
+    "pbf": "^4.0.1",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "tsx": "^4.21.0"
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react-swc": "^4.2.2",
+    "concurrently": "^9.2.1",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4"
