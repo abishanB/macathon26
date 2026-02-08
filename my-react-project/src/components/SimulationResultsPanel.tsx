@@ -29,10 +29,20 @@ function getNearbyBuildingsAndPOIs(
 ): NearbyPlace[] {
   const centerPixel = map.project(centerPoint);
   
+  console.log('[Nearby Buildings Query] ===== START =====');
+  console.log('[Nearby Buildings Query] Center point (construction site):', centerPoint);
+  console.log('[Nearby Buildings Query] Center pixel:', { x: centerPixel.x, y: centerPixel.y });
+  console.log('[Nearby Buildings Query] Search radius:', radiusPixels, 'pixels');
+  
   const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
     [centerPixel.x - radiusPixels, centerPixel.y - radiusPixels],
     [centerPixel.x + radiusPixels, centerPixel.y + radiusPixels]
   ];
+  
+  console.log('[Nearby Buildings Query] Bounding box:', {
+    sw: bbox[0],
+    ne: bbox[1]
+  });
   
   // Query BOTH building and POI layers
   const possibleLayers = [
@@ -52,6 +62,8 @@ function getNearbyBuildingsAndPOIs(
     }
   });
   
+  console.log('[Nearby Buildings Query] Available layers:', existingLayers);
+  
   if (existingLayers.length === 0) {
     console.warn('No POI or building layers found');
     return [];
@@ -60,6 +72,8 @@ function getNearbyBuildingsAndPOIs(
   const features = map.queryRenderedFeatures(bbox, {
     layers: existingLayers
   });
+  
+  console.log('[Nearby Buildings Query] Total features found:', features.length);
   
   const results = new Map<string, NearbyPlace>();
   
@@ -147,9 +161,19 @@ function getNearbyBuildingsAndPOIs(
   });
   
   // Sort by priority (named businesses first), then return top 5
-  return Array.from(results.values())
-    .sort((a, b) => b.priority - a.priority)
-    .slice(0, 5);
+  const sorted = Array.from(results.values())
+    .sort((a, b) => b.priority - a.priority);
+  
+  console.log('[Nearby Buildings Query] Total unique places after dedup:', sorted.length);
+  console.log('[Nearby Buildings Query] Top 10 by priority:', sorted.slice(0, 10).map(p => ({
+    name: p.name,
+    priority: p.priority,
+    type: p.type,
+    address: p.address
+  })));
+  console.log('[Nearby Buildings Query] ===== END =====\n');
+  
+  return sorted.slice(0, 5);
 }
 
 /**

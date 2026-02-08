@@ -1937,7 +1937,34 @@ export default function App() {
         buildingCount={polygonBuildings.size}
         closedRoads={stats.closed}
         map={mapRef.current}
-        centerPoint={mapRef.current?.getCenter().toArray() as [number, number] | undefined}
+        centerPoint={(() => {
+          // Calculate centroid of all placed buildings
+          if (polygonBuildings.size === 0) return undefined;
+          
+          const buildings = Array.from(polygonBuildings.values());
+          let totalLng = 0;
+          let totalLat = 0;
+          let pointCount = 0;
+          
+          buildings.forEach(feature => {
+            if (feature.geometry.type === 'Polygon') {
+              const coords = feature.geometry.coordinates[0]; // First ring
+              coords.forEach((coord: number[]) => {
+                totalLng += coord[0];
+                totalLat += coord[1];
+                pointCount++;
+              });
+            }
+          });
+          
+          if (pointCount === 0) return undefined;
+          
+          const centroid: [number, number] = [totalLng / pointCount, totalLat / pointCount];
+          console.log('[Nearby Buildings] Using construction site centroid:', centroid);
+          console.log('[Nearby Buildings] Number of buildings:', polygonBuildings.size);
+          
+          return centroid;
+        })()}
       />
 
       {cursorCoordinates && (
